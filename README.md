@@ -21,32 +21,61 @@ This makes SentinelMilter particularly useful for identifying novel variations o
 
 AI complements rather than replaces deterministic mail-security controls. SPF, DKIM, DMARC, sender and URL reputation, antivirus scanning, blocklists, and conventional spam filters remain better suited to authentication, reputation, and malware detection. SentinelMilter combines their available results with the message's language and links to make a contextual decision.
 
-## Build and install
+## Install
 
-Go 1.22 or later is required.
+Download the archive for your system from the [latest SentinelMilter release](https://github.com/PhilAnderson1/SentinelMilter/releases/latest):
+
+| Linux architecture | Release archive suffix |
+| --- | --- |
+| x86-64 / AMD64 | `linux-amd64.tar.gz` |
+| ARM64 / AArch64 | `linux-arm64.tar.gz` |
+| 32-bit x86 | `linux-386.tar.gz` |
+| ARMv7 | `linux-armv7.tar.gz` |
+
+Extract the downloaded archive and run its installer. For example, for an AMD64 system:
+
+```sh
+tar -xzf sentinelmilter-v0.1.0-linux-amd64.tar.gz
+cd sentinelmilter-v0.1.0
+sudo ./install.sh
+```
+
+The release binaries are statically linked. The installer places the executable in `/usr/local/sbin`, installs the configuration files in `/etc/sentinelmilter`, and installs the systemd unit when systemd is available. Existing configuration files are preserved.
+
+Edit `/etc/sentinelmilter/sentinelmilter.yaml` and set the endpoint, model, and API key. Alternatively, configure `ai.api_key_env` and make that environment variable available to the service. For Qwen models served by llama.cpp, set `ai.disable_thinking: true` to request non-thinking mode for faster classification.
+
+Validate the configuration before enabling the service:
+
+```sh
+sudo /usr/local/sbin/sentinelmilter --config /etc/sentinelmilter/sentinelmilter.yaml --check-config
+sudo systemctl enable --now sentinelmilter
+```
+
+## Build from source
+
+If a prebuilt binary is not suitable for your system, build SentinelMilter with Go 1.22 or later:
 
 ```sh
 git clone https://github.com/PhilAnderson1/SentinelMilter.git
 cd SentinelMilter
 go test ./...
-go build -trimpath -o sentinelmilter ./cmd/sentinelmilter
+CGO_ENABLED=0 go build -trimpath -o sentinelmilter ./cmd/sentinelmilter
+```
+
+Install the resulting binary, configuration, prompt, and systemd unit:
+
+```sh
 sudo install -m 0755 sentinelmilter /usr/local/sbin/sentinelmilter
-sudo useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin sentinelmilter
+getent group sentinelmilter >/dev/null || sudo groupadd --system sentinelmilter
+id sentinelmilter >/dev/null 2>&1 || sudo useradd --system --gid sentinelmilter --home-dir /nonexistent --shell /usr/sbin/nologin sentinelmilter
 sudo install -d -o root -g sentinelmilter -m 0750 /etc/sentinelmilter
 sudo install -o root -g sentinelmilter -m 0640 configs/sentinelmilter.yaml /etc/sentinelmilter/
 sudo install -o root -g sentinelmilter -m 0640 configs/detection-prompt.txt /etc/sentinelmilter/
 sudo install -m 0644 packaging/systemd/sentinelmilter.service /etc/systemd/system/
-```
-
-Put the OpenRouter key in `ai.api_key`, or configure `ai.api_key_env` and provide that variable to the service. Validate before starting:
-
-For Qwen models served by llama.cpp, set `ai.disable_thinking: true` to request non-thinking mode per message. SentinelMilter sends `thinking_budget_tokens: 0`. Leave it `false` for normal reasoning. Recent llama.cpp builds can also disable reasoning globally by starting `llama-server` with `--reasoning off`.
-
-```sh
-/usr/local/sbin/sentinelmilter --config /etc/sentinelmilter/sentinelmilter.yaml --check-config
 sudo systemctl daemon-reload
-sudo systemctl enable --now sentinelmilter
 ```
+
+Then edit and validate the configuration as described in the installation section above.
 
 ## Postfix
 
