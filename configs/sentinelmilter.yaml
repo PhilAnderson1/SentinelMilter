@@ -1,0 +1,30 @@
+mode: monitor
+
+milter:
+  socket: unix:/run/sentinelmilter/sentinelmilter.sock
+  timeout: 30s
+  max_message_size: 2097152
+  max_concurrent: 8
+
+ai:
+  endpoint: https://openrouter.ai/api/v1/chat/completions
+  api_key: "replace-with-your-openrouter-key"
+  # Alternatively, leave api_key empty and set this environment variable:
+  # api_key_env: OPENROUTER_API_KEY
+  model: openai/gpt-4.1-mini
+  # llama.cpp/Qwen: request non-thinking mode for faster classification.
+  disable_thinking: false
+  prompt_file: /etc/sentinelmilter/detection-prompt.txt
+  timeout: 15s
+  max_body_chars: 50000
+  site_url: ""
+  app_name: SentinelMilter
+
+policy:
+  reject_score: 0.95
+  ai_error_action: accept
+  reject_message: Message rejected as suspected spam or fraud
+
+logging:
+  level: info
+  include_subject: true
