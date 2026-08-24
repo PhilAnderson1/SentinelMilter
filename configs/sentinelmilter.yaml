@@ -1,30 +1,78 @@
+# Operation mode: monitor or enforce.
+# monitor logs proposed decisions but always accepts mail.
+# enforce can reject spam/scam decisions according to policy below.
 mode: monitor
 
 milter:
+  # Listener address. Supported forms:
+  #   unix:/absolute/path/to/socket
+  #   tcp:host:port
   socket: unix:/run/sentinelmilter/sentinelmilter.sock
+
+  # Per-connection I/O timeout. Uses Go duration syntax, for example 30s,
+  # 2m, or 1m30s. Must be long enough for the configured AI timeout.
   timeout: 30s
+
+  # Maximum message body bytes retained for analysis; positive integer.
+  # Larger messages are truncated and the decision log records truncated=true.
   max_message_size: 2097152
+
+  # Maximum number of simultaneous AI analyses; positive integer.
   max_concurrent: 8
 
 ai:
+  # Full OpenAI-compatible chat-completions URL.
   endpoint: https://openrouter.ai/api/v1/chat/completions
+
+  # API credential. For a local endpoint that does not authenticate, a
+  # non-empty placeholder is still required and is sent as a Bearer token.
   api_key: "replace-with-your-openrouter-key"
-  # Alternatively, leave api_key empty and set this environment variable:
+
+  # Alternatively, set api_key: "" and name an environment variable here.
+  # The variable must be available to the SentinelMilter service process.
   # api_key_env: OPENROUTER_API_KEY
+
+  # Model identifier accepted by the endpoint. OpenRouter commonly uses
+  # provider/model names; llama.cpp may use its configured model name or path.
   model: openai/gpt-4.1-mini
-  # llama.cpp/Qwen: request non-thinking mode for faster classification.
+
+  # Boolean: true or false. When true, send thinking_budget_tokens: 0.
+  # This is intended for compatible reasoning models served by llama.cpp.
   disable_thinking: false
+
+  # Absolute path to the system prompt used for every classification.
   prompt_file: /etc/sentinelmilter/detection-prompt.txt
+
+  # Maximum duration of one AI request, using Go duration syntax. Must be > 0.
   timeout: 15s
+
+  # Maximum number of message-text characters supplied to the AI; positive
+  # integer. This is separate from milter.max_message_size, which is in bytes.
   max_body_chars: 50000
+
+  # Optional OpenRouter attribution headers. Empty strings disable them.
+  # site_url is sent as HTTP-Referer; app_name is sent as X-Title.
   site_url: ""
   app_name: SentinelMilter
 
 policy:
+  # Confidence threshold from 0 through 1, inclusive. Used only when the AI
+  # classification is spam or scam; legitimate and uncertain are accepted.
   reject_score: 0.95
+
+  # Action on endpoint timeouts, connection failures, HTTP errors, or invalid
+  # AI responses: accept or tempfail. tempfail applies only in enforce mode;
+  # monitor mode always accepts.
   ai_error_action: accept
+
+  # Text returned with SMTP status 550 5.7.1 when a message is rejected.
+  # Keep this on one line; NUL and newline characters are removed.
   reject_message: Message rejected as suspected spam or fraud
 
 logging:
+  # Minimum log level: debug, info, warn, or error.
   level: info
+
+  # Boolean: include or omit the Subject header in successful decision logs.
+  # Message bodies are never logged.
   include_subject: true
