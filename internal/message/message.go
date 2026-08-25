@@ -103,6 +103,8 @@ func extractText(contentType, encoding string, data []byte, depth int) string {
 		}
 		mr := multipart.NewReader(bytes.NewReader(decoded), boundary)
 		var parts []string
+		var alternativeHTML string
+		var alternativePlain string
 		for {
 			p, err := mr.NextPart()
 			if err == io.EOF {
@@ -112,10 +114,32 @@ func extractText(contentType, encoding string, data []byte, depth int) string {
 				break
 			}
 			b, _ := io.ReadAll(io.LimitReader(p, 2<<20))
-			text := extractText(p.Header.Get("Content-Type"), p.Header.Get("Content-Transfer-Encoding"), b, depth+1)
+			partContentType := p.Header.Get("Content-Type")
+			text := extractText(partContentType, p.Header.Get("Content-Transfer-Encoding"), b, depth+1)
 			if strings.TrimSpace(text) != "" {
 				parts = append(parts, text)
+				if mediaType == "multipart/alternative" {
+					partMediaType, _, _ := mime.ParseMediaType(partContentType)
+					switch partMediaType {
+					case "text/html":
+						alternativeHTML = text
+					case "text/plain":
+						alternativePlain = text
+					}
+				}
 			}
+		}
+		if mediaType == "multipart/alternative" {
+			if strings.TrimSpace(alternativeHTML) != "" {
+				return alternativeHTML
+			}
+			if strings.TrimSpace(alternativePlain) != "" {
+				return alternativePlain
+			}
+			if len(parts) > 0 {
+				return parts[len(parts)-1]
+			}
+			return ""
 		}
 		return strings.Join(parts, "\n\n")
 	}

@@ -59,7 +59,7 @@ ai:
 policy:
   # Confidence threshold from 0 through 1, inclusive. Used only when the AI
   # classification is spam or scam; legitimate and uncertain are accepted.
-  reject_score: 0.95
+  reject_score: 0.9
 
   # Action on endpoint timeouts, connection failures, HTTP errors, or invalid
   # AI responses: accept or tempfail. tempfail applies only in enforce mode;
