@@ -38,9 +38,10 @@ func (c *Client) Analyze(ctx context.Context, message string) (Decision, error) 
 		},
 	}
 	if c.cfg.DisableThinking {
-		// Current llama.cpp per-request reasoning control. Do not combine this
-		// with the legacy chat-template toggle; some Qwen builds mishandle both.
+		// Send both controls: thinking_budget_tokens is used by llama.cpp, while
+		// OpenRouter uses its unified reasoning parameter.
 		reqBody["thinking_budget_tokens"] = 0
+		reqBody["reasoning"] = map[string]string{"effort": "none"}
 	}
 	b, err := json.Marshal(reqBody)
 	if err != nil {

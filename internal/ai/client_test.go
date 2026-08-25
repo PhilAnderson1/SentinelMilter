@@ -51,6 +51,10 @@ func TestDisableThinkingRequestFields(t *testing.T) {
 	if body["thinking_budget_tokens"] != float64(0) {
 		t.Fatalf("thinking budget missing: %#v", body)
 	}
+	reasoning, ok := body["reasoning"].(map[string]any)
+	if !ok || reasoning["effort"] != "none" {
+		t.Fatalf("OpenRouter reasoning control missing: %#v", body)
+	}
 	if _, exists := body["chat_template_kwargs"]; exists {
 		t.Fatalf("legacy chat template setting must not be combined with reasoning budget: %#v", body)
 	}

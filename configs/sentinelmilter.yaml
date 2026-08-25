@@ -35,11 +35,11 @@ ai:
 
   # Model identifier accepted by the endpoint. OpenRouter commonly uses
   # provider/model names; llama.cpp may use its configured model name or path.
-  model: openai/gpt-4.1-mini
+  model: qwen/qwen3.6-35b-a3b
 
-  # Boolean: true or false. When true, send thinking_budget_tokens: 0.
-  # This is intended for compatible reasoning models served by llama.cpp.
-  disable_thinking: false
+  # Boolean: true or false. When true, send both llama.cpp's
+  # thinking_budget_tokens: 0 and OpenRouter's reasoning.effort: none.
+  disable_thinking: true
 
   # Absolute path to the system prompt used for every classification.
   prompt_file: /etc/sentinelmilter/detection-prompt.txt

@@ -42,7 +42,7 @@ sudo ./install.sh
 
 The release binaries are statically linked. The installer places the executable in `/usr/local/sbin`, installs the configuration files in `/etc/sentinelmilter`, and installs the systemd unit when systemd is available. Existing configuration files are preserved.
 
-Edit `/etc/sentinelmilter/sentinelmilter.yaml` and set the endpoint, model, and API key. Alternatively, configure `ai.api_key_env` and make that environment variable available to the service. For Qwen models served by llama.cpp, set `ai.disable_thinking: true` to request non-thinking mode for faster classification.
+Edit `/etc/sentinelmilter/sentinelmilter.yaml` and set the endpoint, model, and API key. Alternatively, configure `ai.api_key_env` and make that environment variable available to the service. For compatible reasoning models served through OpenRouter or llama.cpp, set `ai.disable_thinking: true` to request non-thinking mode for faster classification.
 
 Validate the configuration before enabling the service:
 
