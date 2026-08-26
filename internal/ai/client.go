@@ -82,7 +82,7 @@ func (c *Client) Analyze(ctx context.Context, message string) (Decision, error) 
 		return Decision{}, fmt.Errorf("decode endpoint response: %w", err)
 	}
 	if len(envelope.Choices) == 0 {
-		return Decision{}, fmt.Errorf("endpoint returned no choices")
+		return Decision{}, fmt.Errorf("endpoint returned no choices: response_body=%q", responseExcerpt(raw))
 	}
 	var d Decision
 	dec := json.NewDecoder(strings.NewReader(envelope.Choices[0].Message.Content))
@@ -98,6 +98,16 @@ func (c *Client) Analyze(ctx context.Context, message string) (Decision, error) 
 		return Decision{}, err
 	}
 	return d, nil
+}
+
+const maxResponseExcerptBytes = 2048
+
+func responseExcerpt(raw []byte) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) <= maxResponseExcerptBytes {
+		return string(trimmed)
+	}
+	return string(trimmed[:maxResponseExcerptBytes]) + "...[truncated]"
 }
 
 func validate(d Decision) error {

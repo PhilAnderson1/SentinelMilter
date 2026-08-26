@@ -60,6 +60,41 @@ func TestDisableThinkingRequestFields(t *testing.T) {
 	}
 }
 
+func TestNoChoicesIncludesResponseBody(t *testing.T) {
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"upstream unavailable"}}`)),
+		}, nil
+	})
+
+	client := NewClient(config.AIConfig{
+		Endpoint: "http://llama.invalid/v1/chat/completions",
+		APIKey:   "test-key",
+		Model:    "qwen",
+		Timeout:  config.Duration(time.Second),
+	}, "classify")
+	client.http.Transport = transport
+
+	_, err := client.Analyze(context.Background(), "test message")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if err.Error() != `endpoint returned no choices: response_body="{\"error\":{\"message\":\"upstream unavailable\"}}"` {
+		t.Fatalf("response body missing from error: %v", err)
+	}
+}
+
+func TestResponseExcerptIsBounded(t *testing.T) {
+	raw := []byte("  " + strings.Repeat("x", maxResponseExcerptBytes+1) + "  ")
+	got := responseExcerpt(raw)
+	want := strings.Repeat("x", maxResponseExcerptBytes) + "...[truncated]"
+	if got != want {
+		t.Fatalf("unexpected excerpt length or contents: got %d bytes, want %d", len(got), len(want))
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
