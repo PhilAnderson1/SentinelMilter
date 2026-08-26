@@ -9,8 +9,9 @@ milter:
   #   tcp:host:port
   socket: unix:/run/sentinelmilter/sentinelmilter.sock
 
-  # Per-connection I/O timeout. Uses Go duration syntax, for example 30s,
-  # 2m, or 1m30s. Must be long enough for the configured AI timeout.
+  # Idle/protocol I/O timeout. Uses Go duration syntax, for example 30s,
+  # 2m, or 1m30s. During analysis SentinelMilter automatically uses this value
+  # or ai.timeout plus a response-writing margin, whichever is longer.
   timeout: 30s
 
   # Maximum message body bytes retained for analysis; positive integer.

@@ -18,6 +18,7 @@ import (
 )
 
 const maxFrame = 16 << 20
+const analysisResponseMargin = 5 * time.Second
 
 type Analyzer interface {
 	Analyze(context.Context, string) (ai.Decision, error)
@@ -58,7 +59,11 @@ func (s *Server) handle(parent context.Context, c net.Conn) {
 		frame, err := readFrame(r)
 		if err != nil {
 			if err != io.EOF {
-				s.log.Warn("milter connection error", "error", err)
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					s.log.Debug("milter connection timeout", "error", err)
+				} else {
+					s.log.Warn("milter connection error", "error", err)
+				}
 			}
 			return
 		}
@@ -98,6 +103,10 @@ func (s *Server) handle(parent context.Context, c net.Conn) {
 				return
 			}
 		case 'E':
+			// AI analysis may legitimately take longer than the ordinary milter
+			// I/O timeout. Leave a small margin to send the milter response after
+			// the AI request itself reaches its deadline.
+			_ = c.SetDeadline(time.Now().Add(s.analysisTimeout()))
 			response := s.evaluate(parent, &msg)
 			if writeFrame(c, response) != nil {
 				return
@@ -116,6 +125,14 @@ func (s *Server) handle(parent context.Context, c net.Conn) {
 			}
 		}
 	}
+}
+
+func (s *Server) analysisTimeout() time.Duration {
+	timeout := s.cfg.AI.Timeout.Value() + analysisResponseMargin
+	if milterTimeout := s.cfg.Milter.Timeout.Value(); milterTimeout > timeout {
+		return milterTimeout
+	}
+	return timeout
 }
 
 func (s *Server) evaluate(parent context.Context, msg *message.Message) []byte {

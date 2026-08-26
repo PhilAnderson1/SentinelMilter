@@ -79,7 +79,7 @@ Then edit and validate the configuration as described in the installation sectio
 
 ## Postfix
 
-Add to `main.cf` (adjust timeouts to remain above the AI timeout):
+Add to `main.cf` (ensure Postfix's milter content timeout remains above the AI timeout):
 
 ```text
 smtpd_milters = unix:/run/sentinelmilter/sentinelmilter.sock
