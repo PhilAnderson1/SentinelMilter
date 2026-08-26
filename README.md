@@ -82,13 +82,13 @@ Then edit and validate the configuration as described in the installation sectio
 Add to `main.cf` (ensure Postfix's milter content timeout remains above the AI timeout):
 
 ```text
-smtpd_milters = unix:/run/sentinelmilter/sentinelmilter.sock
-non_smtpd_milters = unix:/run/sentinelmilter/sentinelmilter.sock
+smtpd_milters = inet:127.0.0.1:8895
+non_smtpd_milters = inet:127.0.0.1:8895
 milter_default_action = accept
 milter_protocol = 6
 ```
 
-The Postfix process must be able to access the socket directory. On installations where Postfix SMTP runs chrooted, expose the socket inside its chroot or use a loopback TCP listener with appropriate firewalling.
+SentinelMilter also supports Unix sockets, for example `unix:/run/sentinelmilter/sentinelmilter.sock`. The Postfix process must be able to access the socket and its parent directory; on installations where Postfix SMTP runs chrooted, expose the socket inside its chroot. Keep TCP listeners bound to a loopback address unless access is restricted separately.
 
 Logs are JSON records in the systemd journal. A successful decision records both `proposed_action` and `actual_action`, making monitor-mode evaluation explicit.
 

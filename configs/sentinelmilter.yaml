@@ -4,10 +4,10 @@
 mode: monitor
 
 milter:
-  # Listener address. Supported forms:
-  #   unix:/absolute/path/to/socket
-  #   tcp:host:port
-  socket: unix:/run/sentinelmilter/sentinelmilter.sock
+  # Listener address. The default is a loopback-only TCP listener. Change the
+  # port if it conflicts locally; do not expose it on a public interface.
+  # A Unix socket may be used instead: unix:/run/sentinelmilter/sentinelmilter.sock
+  socket: tcp:127.0.0.1:8895
 
   # Idle/protocol I/O timeout. Uses Go duration syntax, for example 30s,
   # 2m, or 1m30s. During analysis SentinelMilter automatically uses this value
