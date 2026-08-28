@@ -58,12 +58,15 @@ func (s *Server) handle(parent context.Context, c net.Conn) {
 		_ = c.SetDeadline(time.Now().Add(s.cfg.Milter.Timeout.Value()))
 		frame, err := readFrame(r)
 		if err != nil {
-			if err != io.EOF {
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					s.log.Debug("milter connection timeout", "error", err)
-				} else {
-					s.log.Warn("milter connection error", "error", err)
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				if parent.Err() != nil {
+					return
 				}
+				s.log.Debug("milter connection idle", "error", err)
+				continue
+			}
+			if err != io.EOF {
+				s.log.Warn("milter connection error", "error", err)
 			}
 			return
 		}
