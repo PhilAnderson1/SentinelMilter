@@ -57,8 +57,46 @@ func TestPromptTruncates(t *testing.T) {
 	m := New(10000)
 	m.AddBody([]byte("abcdef"))
 	p := m.Prompt(3)
-	if !strings.Contains(p, "abc\n[body truncated]") {
+	if !strings.Contains(p, "ab\n[... body omitted ...]\nf\n[body truncated; beginning and end retained]") {
 		t.Fatalf("not truncated: %s", p)
+	}
+}
+
+func TestHeaderPaddingCannotConsumeBodyBudget(t *testing.T) {
+	m := New(128)
+	for range 300 {
+		m.AddHeader("Authentication-Results", strings.Repeat("padding", 200))
+		m.AddHeader("X-Ignored-Padding", strings.Repeat("ignored", 1000))
+	}
+	body := "Your account is suspended. Sign in at https://evil.example/login"
+	m.AddBody([]byte(body))
+	prompt := m.Prompt(1000)
+	if !strings.Contains(prompt, body) {
+		t.Fatalf("header padding consumed body allowance: %s", prompt)
+	}
+}
+
+func TestLongBodySamplesBeginningMiddleAndEnd(t *testing.T) {
+	m := New(10000)
+	body := "BEGIN-EVIDENCE " + strings.Repeat("a", 400) + " MIDDLE-EVIDENCE " + strings.Repeat("b", 400) + " END-EVIDENCE"
+	m.AddBody([]byte(body))
+	prompt := m.Prompt(120)
+	for _, evidence := range []string{"BEGIN-EVIDENCE", "MIDDLE-EVIDENCE", "END-EVIDENCE"} {
+		if !strings.Contains(prompt, evidence) {
+			t.Errorf("sampled prompt omitted %s: %s", evidence, prompt)
+		}
+	}
+}
+
+func TestLinkInventorySurvivesOmittedBodySection(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/html")
+	link := "https://evil.example/steal-password"
+	body := "<p>" + strings.Repeat("a", 200) + `<a href="` + link + `">verify</a>` + strings.Repeat("b", 800) + "</p>"
+	m.AddBody([]byte(body))
+	prompt := m.Prompt(100)
+	if !strings.Contains(prompt, "EXTRACTED LINKS") || !strings.Contains(prompt, "- "+link) {
+		t.Fatalf("independent link inventory omitted a link outside sampled text: %s", prompt)
 	}
 }
 
