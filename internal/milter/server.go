@@ -92,6 +92,16 @@ func (s *Server) handle(parent context.Context, c net.Conn) {
 				return
 			}
 		case 'D': // macro definitions have no response
+		case 'A': // abort resets transaction state and has no response
+			msg = *message.New(s.cfg.Milter.MaxMessageSize)
+		case 'K': // quit current SMTP connection but keep milter connection
+			msg = *message.New(s.cfg.Milter.MaxMessageSize)
+		case 'C', 'H', 'M', 'R', 'T', 'N', 'U':
+			// CONNECT, HELO, MAIL, RCPT, DATA, EOH, and UNKNOWN all require
+			// an accept/reject action response.
+			if writeFrame(c, []byte{'c'}) != nil {
+				return
+			}
 		case 'L':
 			parts := splitNull(payload)
 			if len(parts) >= 2 {
@@ -115,17 +125,11 @@ func (s *Server) handle(parent context.Context, c net.Conn) {
 				return
 			}
 			msg = *message.New(s.cfg.Milter.MaxMessageSize)
-		case 'A':
-			msg = *message.New(s.cfg.Milter.MaxMessageSize)
-			if writeFrame(c, []byte{'c'}) != nil {
-				return
-			}
 		case 'Q':
 			return
 		default:
-			if writeFrame(c, []byte{'c'}) != nil {
-				return
-			}
+			s.log.Warn("unsupported milter command", "command", fmt.Sprintf("0x%02x", cmd))
+			return
 		}
 	}
 }
