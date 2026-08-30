@@ -182,8 +182,17 @@ func (s *Server) onError(msg *message.Message, err error, start time.Time) []byt
 	return []byte{'a'}
 }
 func replyCode(code, enhanced, text string) []byte {
-	clean := func(v string) string { return strings.ReplaceAll(strings.ReplaceAll(v, "\x00", ""), "\n", " ") }
-	return append([]byte{'y'}, []byte(clean(code)+"\x00"+clean(enhanced)+"\x00"+clean(text)+"\x00")...)
+	clean := func(v string) string {
+		v = strings.ReplaceAll(v, "\x00", "")
+		v = strings.ReplaceAll(v, "\r", " ")
+		return strings.ReplaceAll(v, "\n", " ")
+	}
+	// SMFIR_REPLYCODE is one NUL-terminated SMTP reply string: the three-byte
+	// status code, a space, and the response text. Percent signs must be doubled
+	// because some MTAs process the text as a printf-style format string.
+	reply := clean(code) + " " + clean(enhanced) + " " + clean(text)
+	reply = strings.ReplaceAll(reply, "%", "%%")
+	return append([]byte{'y'}, []byte(reply+"\x00")...)
 }
 func splitNull(p []byte) []string {
 	raw := strings.Split(string(p), "\x00")

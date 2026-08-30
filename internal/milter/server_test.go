@@ -71,3 +71,11 @@ func TestAnalysisTimeoutPreservesLongerMilterTimeout(t *testing.T) {
 		t.Fatalf("analysis timeout = %v, want %v", got, want)
 	}
 }
+
+func TestReplyCodeWireFormat(t *testing.T) {
+	got := replyCode("550", "5.7.1", "Message rejected: 100% spam\ntry again")
+	want := []byte("y550 5.7.1 Message rejected: 100%% spam try again\x00")
+	if string(got) != string(want) {
+		t.Fatalf("reply code = %q, want %q", got, want)
+	}
+}
