@@ -2,24 +2,19 @@
 
 [![CI](https://github.com/PhilAnderson1/SentinelMilter/actions/workflows/ci.yml/badge.svg)](https://github.com/PhilAnderson1/SentinelMilter/actions/workflows/ci.yml)
 
-SentinelMilter is an AI-powered milter for efficiently and accurately identifying and rejecting unwanted email. SentinelMilter is compatible with OpenRouter or llama.cpp-type `v1/chat/completions` endpoints.
+SentinelMilter is an AI-powered mail filter for identifying and rejecting unwanted email. It has been tested with Postfix but is designed to work with any MTA that supports the Sendmail Milter protocol.
 
 ## Why SentinelMilter?
 
-Traditional filters are good at detecting known senders, signatures, keywords, reputation signals, and statistical patterns. Scams, however, are often defined by meaning: what the sender claims, what they want the recipient to do, and how those elements combine. Attackers can change their wording, formatting, domains, and story while preserving the same underlying scam.
+- Scans inbound and outbound email, helping protect your server's sending reputation.
+- Uses semantic analysis to detect unwanted email by meaning, not just keywords or signatures.
+- Performs forensic AI analysis of message headers, body content, and hyperlink destinations.
+- Installs easily as a single, statically linked binary with no runtime dependencies.
+- Cost-effective to operate at approximately $0.35 per 1,000 emails with the suggested LLM, depending on message length and provider pricing.
+- Provides a safe monitor mode that logs classifications and proposed actions without blocking email.
+- Avoids provider lock-in by supporting compatible hosted AI services and locally operated AI models.
 
-SentinelMilter adds an LLM-based semantic layer that can:
-
-- Recognize a scam pattern even when its exact wording has not been seen before.
-- Evaluate combinations of evidence, such as a claimed Microsoft alert paired with a sign-in link to an unrelated domain.
-- Distinguish suspicious requests from legitimate receipts, account notifications, subscribed newsletters, and ongoing correspondence by considering the surrounding context.
-- Compare visible link text with the actual destination preserved during HTML conversion.
-- Apply user-defined unwanted-email patterns written in plain language instead of requiring complex regular expressions or code changes.
-- Explain every classification with a confidence score and concise, evidence-based reasons.
-
-This makes SentinelMilter particularly useful for identifying novel variations of phishing, extortion, advance-fee fraud, and unsolicited commercial outreach. Its role is to evaluate what a message is trying to persuade the recipient to believe or do.
-
-AI complements rather than replaces deterministic mail-security controls. SPF, DKIM, DMARC, sender and URL reputation, antivirus scanning, blocklists, and conventional spam filters remain better suited to authentication, reputation, and malware detection. SentinelMilter combines their available results with the message's language and links to make a contextual decision.
+SentinelMilter works with OpenRouter and llama.cpp-style `v1/chat/completions` endpoints, supporting both hosted AI models and local inference.
 
 ## Install
 

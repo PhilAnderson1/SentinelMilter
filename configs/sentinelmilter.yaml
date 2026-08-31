@@ -1,3 +1,12 @@
+# SentinelMilter: https://github.com/PhilAnderson1/SentinelMilter
+#
+# This example configuration and the supplied detection prompt have been tuned
+# and tested with Qwen3.6-35B-A3B. Other LLMs may require adjustments to the
+# prompt, rejection threshold, timeout, or reasoning settings.
+#
+# To use OpenRouter, create an account and API key at:
+# https://openrouter.ai/
+
 # Operation mode: monitor or enforce.
 # monitor logs proposed decisions but always accepts mail.
 # enforce can reject spam/scam decisions according to policy below.
