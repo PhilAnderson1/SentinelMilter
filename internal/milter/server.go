@@ -15,7 +15,7 @@ import (
 const analysisResponseMargin = 5 * time.Second
 
 type Analyzer interface {
-	Analyze(context.Context, string) (ai.Decision, error)
+	Analyze(context.Context, ai.Input) (ai.Decision, error)
 }
 
 type evaluationResult struct {
@@ -24,20 +24,22 @@ type evaluationResult struct {
 	classification string
 	score          float64
 	reasons        []string
+	visionImages   int
 	err            error
 	latency        time.Duration
 }
 
 type Server struct {
-	cfg      config.Config
-	analyzer Analyzer
-	log      *slog.Logger
-	slots    chan struct{}
-	wg       sync.WaitGroup
+	cfg         config.Config
+	analyzer    Analyzer
+	log         *slog.Logger
+	slots       chan struct{}
+	rejectedIPs *rejectedIPCache
+	wg          sync.WaitGroup
 }
 
 func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.Milter.MaxConcurrent)}
+	return &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.Milter.MaxConcurrent), rejectedIPs: newRejectedIPCache(cfg.Policy, log)}
 }
 
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
@@ -85,9 +87,22 @@ func (s *Server) evaluate(parent context.Context, msg *message.Message) evaluati
 		return s.analysisFailure(ctx.Err(), started)
 	}
 
-	decision, err := s.analyzer.Analyze(ctx, msg.Prompt(s.cfg.AI.MaxBodyChars))
+	analysis := msg.BuildAnalysis(s.cfg.AI.MaxBodyChars, message.VisionOptions{
+		Mode:         s.cfg.AI.VisionMode,
+		MinTextChars: s.cfg.AI.VisionMinTextChars,
+		MaxImages:    s.cfg.AI.MaxImages,
+		MaxBytes:     s.cfg.AI.MaxImageBytes,
+		MaxPixels:    s.cfg.AI.MaxImagePixels,
+	})
+	input := ai.Input{Text: analysis.Prompt, Images: make([]ai.Image, 0, len(analysis.Images))}
+	for _, image := range analysis.Images {
+		input.Images = append(input.Images, ai.Image{MediaType: image.MediaType, Data: image.Data})
+	}
+	decision, err := s.analyzer.Analyze(ctx, input)
 	if err != nil {
-		return s.analysisFailure(err, started)
+		failure := s.analysisFailure(err, started)
+		failure.visionImages = len(input.Images)
+		return failure
 	}
 
 	proposed, selected := s.applyPolicy(decision)
@@ -97,6 +112,7 @@ func (s *Server) evaluate(parent context.Context, msg *message.Message) evaluati
 		classification: decision.Classification,
 		score:          decision.Score,
 		reasons:        decision.Reasons,
+		visionImages:   len(input.Images),
 		latency:        time.Since(started),
 	}
 }
@@ -138,6 +154,7 @@ func (s *Server) logOutcome(ctx context.Context, msg *message.Message, result ev
 			"message_id", msg.Header("Message-ID"), "mode", s.cfg.Mode,
 			"actual_action", result.selected.String(), "error", result.err,
 			"latency_ms", result.latency.Milliseconds(), "response_sent", sent,
+			"vision_images", result.visionImages,
 		}
 		if responseErr != nil {
 			attrs = append(attrs, "response_error", responseErr)
@@ -152,7 +169,7 @@ func (s *Server) logOutcome(ctx context.Context, msg *message.Message, result ev
 		"reasons", result.reasons, "proposed_action", result.proposed.String(),
 		"actual_action", result.selected.String(), "model", s.cfg.AI.Model,
 		"latency_ms", result.latency.Milliseconds(), "truncated", msg.Truncated,
-		"response_sent", sent,
+		"response_sent", sent, "vision_images", result.visionImages,
 	}
 	if s.cfg.Logging.IncludeSubject {
 		attrs = append(attrs, "subject", msg.Header("Subject"))

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/PhilAnderson1/SentinelMilter/internal/message"
@@ -27,6 +28,7 @@ type session struct {
 	reader    *bufio.Reader
 	phase     protocolPhase
 	connected bool
+	peerIP    netip.Addr
 	message   *message.Message
 }
 
@@ -86,6 +88,7 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		return true
 	case commandQuitConnection:
 		ss.connected = false
+		ss.peerIP = netip.Addr{}
 		ss.resetMessage(phaseConnection)
 		return true
 	case commandConnect:
@@ -93,6 +96,12 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 			return ss.protocolError("unexpected milter CONNECT command")
 		}
 		ss.connected = true
+		ss.peerIP = netip.Addr{}
+		if addr, ok := parseConnectIP(payload); ok {
+			ss.peerIP = addr
+		} else {
+			ss.server.log.Debug("milter CONNECT did not provide a usable IP address")
+		}
 		return ss.sendContinue(command)
 	case commandHelo:
 		if ss.phase != phaseConnection {
@@ -102,6 +111,9 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 	case commandMail:
 		if ss.phase != phaseConnection {
 			return ss.protocolError("milter MAIL command during active message")
+		}
+		if cached, keepConnection := ss.rejectCachedIP(ctx); cached {
+			return keepConnection
 		}
 		ss.resetMessage(phaseEnvelope)
 		return ss.sendContinue(command)
@@ -176,8 +188,41 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
+	if result.selected == actionReject && ss.server.cfg.Mode == "enforce" {
+		ss.server.rejectedIPs.add(ctx, ss.peerIP, result.classification, result.score)
+	}
 	ss.resetMessage(phaseConnection)
 	return true
+}
+
+func (ss *session) rejectCachedIP(ctx context.Context) (bool, bool) {
+	if ss.server.cfg.Mode != "enforce" {
+		return false, true
+	}
+	entry, ok := ss.server.rejectedIPs.lookup(ss.peerIP)
+	if !ok {
+		return false, true
+	}
+	err := writeFrame(ss.conn, ss.server.encodeAction(actionReject))
+	attrs := []any{
+		"remote_ip", ss.peerIP.String(),
+		"mode", ss.server.cfg.Mode,
+		"classification", entry.classification,
+		"score", entry.score,
+		"proposed_action", actionReject.String(),
+		"actual_action", actionReject.String(),
+		"source", "rejected_ip_cache",
+		"block_expires_at", entry.expires,
+		"block_remaining_ms", time.Until(entry.expires).Milliseconds(),
+		"response_sent", err == nil,
+	}
+	if err != nil {
+		attrs = append(attrs, "response_error", err)
+		ss.server.log.ErrorContext(ctx, "message rejected from cached sending IP", attrs...)
+		return true, false
+	}
+	ss.server.log.InfoContext(ctx, "message rejected from cached sending IP", attrs...)
+	return true, true
 }
 
 func (ss *session) resetMessage(phase protocolPhase) {

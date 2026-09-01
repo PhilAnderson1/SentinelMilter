@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -17,6 +18,11 @@ import (
 
 type fixedAnalyzer struct {
 	decision ai.Decision
+}
+
+type countingAnalyzer struct {
+	decision ai.Decision
+	calls    atomic.Int32
 }
 
 type shortWriter struct {
@@ -31,7 +37,12 @@ func (w *shortWriter) Write(p []byte) (int, error) {
 	return w.b.Write(p)
 }
 
-func (a fixedAnalyzer) Analyze(context.Context, string) (ai.Decision, error) {
+func (a fixedAnalyzer) Analyze(context.Context, ai.Input) (ai.Decision, error) {
+	return a.decision, nil
+}
+
+func (a *countingAnalyzer) Analyze(context.Context, ai.Input) (ai.Decision, error) {
+	a.calls.Add(1)
 	return a.decision, nil
 }
 
@@ -103,6 +114,14 @@ func sendContinueFrames(t *testing.T, conn net.Conn, frames ...[]byte) {
 	}
 }
 
+func connectFrame(family byte, address string) []byte {
+	payload := []byte{commandConnect}
+	payload = append(payload, []byte("mail.example\x00")...)
+	payload = append(payload, family, 0, 25)
+	payload = append(payload, []byte(address)...)
+	return append(payload, 0)
+}
+
 func TestCommandResponseRequirements(t *testing.T) {
 	for _, cmd := range []byte{commandConnect, commandHelo, commandMail, commandRecipient, commandData, commandEndHeaders, commandUnknown} {
 		t.Run(string(cmd), func(t *testing.T) {
@@ -149,6 +168,75 @@ func TestOptionNegotiationResponse(t *testing.T) {
 	}
 	if len(reply) != 13 || reply[0] != commandOptionNegotiation || binary.BigEndian.Uint32(reply[1:5]) != 6 {
 		t.Fatalf("unexpected negotiation response: %q", reply)
+	}
+}
+
+func TestParseConnectIP(t *testing.T) {
+	tests := []struct {
+		family  byte
+		address string
+		want    string
+	}{
+		{family: '4', address: "192.0.2.25", want: "192.0.2.25"},
+		{family: '6', address: "2001:db8::25", want: "2001:db8::25"},
+	}
+	for _, test := range tests {
+		frame := connectFrame(test.family, test.address)
+		addr, ok := parseConnectIP(frame[1:])
+		if !ok || addr.String() != test.want {
+			t.Errorf("parseConnectIP(%q) = %s, %v; want %s", test.address, addr, ok, test.want)
+		}
+	}
+	for _, payload := range [][]byte{
+		{},
+		[]byte("host\x004\x00\x19not-an-ip\x00"),
+		connectFrame('4', "2001:db8::1")[1:],
+	} {
+		if addr, ok := parseConnectIP(payload); ok {
+			t.Errorf("accepted malformed CONNECT address %s", addr)
+		}
+	}
+}
+
+func TestRejectedIPBypassesSecondAIAnalysis(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "scam", Score: 1, Reasons: []string{"test"}}}
+	server, conn, done := testServer(t, analyzer)
+	server.cfg.Policy.RejectedIPBlockDuration = config.Duration(15 * time.Minute)
+	server.cfg.Policy.RejectedIPCacheSize = 100
+	server.rejectedIPs = newRejectedIPCache(server.cfg.Policy, server.log)
+	defer conn.Close()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn, connectFrame('4', "192.0.2.25"))
+	sendContinueFrames(t, conn,
+		[]byte{commandMail},
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("first scam")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
+
+	if err := writeFrame(conn, []byte{commandMail}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
+	if got := analyzer.calls.Load(); got != 1 {
+		t.Fatalf("AI analysis calls = %d, want 1", got)
+	}
+
+	if err := writeFrame(conn, []byte{commandAbort}); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	if err := writeFrame(conn, []byte{commandQuit}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not exit after quit")
 	}
 }
 

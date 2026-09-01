@@ -6,15 +6,16 @@ SentinelMilter is an AI-powered mail filter for identifying and rejecting unwant
 
 ## Why SentinelMilter?
 
-- Scans inbound and outbound email, helping protect your server's sending reputation.
 - Uses semantic analysis to detect unwanted email by meaning, not just keywords or signatures.
 - Performs forensic AI analysis of message headers, body content, and hyperlink destinations.
+- Reads text embedded in images to detect scams that evade conventional text-based filters.
+- Scans inbound and outbound email, helping protect your server's sending reputation.
 - Installs easily as a single, statically linked binary with no runtime dependencies.
-- Cost-effective to operate at approximately $0.35 per 1,000 emails with the suggested LLM, depending on message length and provider pricing.
 - Provides a safe monitor mode that logs classifications and proposed actions without blocking email.
-- Avoids provider lock-in by supporting compatible hosted AI services and locally operated AI models.
+- Cost-effective to operate at approximately $0.35 per 1,000 emails with the suggested LLM, depending on message length and provider pricing.
+- Avoids provider lock-in by supporting compatible hosted AI services and locally hosted AI models.
 
-SentinelMilter works with OpenRouter and llama.cpp-style `v1/chat/completions` endpoints, supporting both hosted AI models and local inference.
+SentinelMilter works with OpenRouter and llama.cpp-style `v1/chat/completions` AI endpoints.
 
 ## Install
 
@@ -37,13 +38,46 @@ sudo ./install.sh
 
 The release binaries are statically linked. The installer places the executable in `/usr/local/sbin`, installs the configuration files in `/etc/sentinelmilter`, and installs the systemd unit when systemd is available. Existing configuration files are preserved.
 
-Edit `/etc/sentinelmilter/sentinelmilter.yaml` and set the endpoint, model, and API key. Alternatively, configure `ai.api_key_env` and make that environment variable available to the service. For compatible reasoning models served through OpenRouter or llama.cpp, set `ai.disable_thinking: true` to request non-thinking mode for faster classification.
+### Configuration
+
+Edit `/etc/sentinelmilter/sentinelmilter.yaml` before starting the service. To use a hosted model, create an account and API key at [OpenRouter](https://openrouter.ai/), then add the key and desired model to the `ai` section. Alternatively, change the endpoint and model to use a locally operated llama.cpp `v1/chat/completions` server. An API key can be stored in `ai.api_key` or supplied through the environment variable named by `ai.api_key_env`.
+
+Leave SentinelMilter in `monitor` mode initially so that it records classifications and proposed actions without rejecting messages.
+
+For Postfix, add the following to `main.cf` (ensure Postfix's milter content timeout remains above the AI timeout):
+
+```text
+smtpd_milters = inet:127.0.0.1:8895
+non_smtpd_milters = inet:127.0.0.1:8895
+milter_default_action = accept
+milter_protocol = 6
+```
+
+SentinelMilter also supports Unix sockets, for example `unix:/run/sentinelmilter/sentinelmilter.sock`. The Postfix process must be able to access the socket and its parent directory; on installations where Postfix SMTP runs chrooted, expose the socket inside its chroot. Keep TCP listeners bound to a loopback address unless access is restricted separately.
 
 Validate the configuration before enabling the service:
 
 ```sh
 sudo /usr/local/sbin/sentinelmilter --config /etc/sentinelmilter/sentinelmilter.yaml --check-config
 sudo systemctl enable --now sentinelmilter
+```
+
+Reload Postfix after changing `main.cf`:
+
+```sh
+sudo postfix reload
+```
+
+Send representative legitimate and unwanted test messages, then monitor SentinelMilter's classifications, scores, reasons, proposed actions, and actual actions:
+
+```sh
+sudo journalctl -u sentinelmilter --since yesterday --no-pager -o cat
+```
+
+Once monitor-mode results are satisfactory, change `mode: monitor` to `mode: enforce` in `/etc/sentinelmilter/sentinelmilter.yaml` and restart SentinelMilter:
+
+```sh
+sudo systemctl restart sentinelmilter
 ```
 
 ## Build from source
@@ -71,21 +105,6 @@ sudo systemctl daemon-reload
 ```
 
 Then edit and validate the configuration as described in the installation section above.
-
-## Postfix
-
-Add to `main.cf` (ensure Postfix's milter content timeout remains above the AI timeout):
-
-```text
-smtpd_milters = inet:127.0.0.1:8895
-non_smtpd_milters = inet:127.0.0.1:8895
-milter_default_action = accept
-milter_protocol = 6
-```
-
-SentinelMilter also supports Unix sockets, for example `unix:/run/sentinelmilter/sentinelmilter.sock`. The Postfix process must be able to access the socket and its parent directory; on installations where Postfix SMTP runs chrooted, expose the socket inside its chroot. Keep TCP listeners bound to a loopback address unless access is restricted separately.
-
-Logs are JSON records in the systemd journal. A successful decision records both `proposed_action` and `actual_action`, making monitor-mode evaluation explicit.
 
 ## License
 

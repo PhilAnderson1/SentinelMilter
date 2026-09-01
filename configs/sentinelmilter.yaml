@@ -4,7 +4,7 @@
 # and tested with Qwen3.6-35B-A3B. Other LLMs may require adjustments to the
 # prompt, rejection threshold, timeout, or reasoning settings.
 #
-# To use OpenRouter, create an account and API key at:
+# To use with OpenRouter, create an account and API key at:
 # https://openrouter.ai/
 
 # Operation mode: monitor or enforce.
@@ -21,7 +21,7 @@ milter:
   # Idle/protocol I/O timeout. Uses Go duration syntax, for example 30s,
   # 2m, or 1m30s. During analysis SentinelMilter automatically uses this value
   # or ai.timeout plus a response-writing margin, whichever is longer.
-  timeout: 30s
+  timeout: 1m
 
   # Maximum message body bytes retained for analysis; positive integer.
   # Larger messages are truncated and the decision log records truncated=true.
@@ -55,15 +55,29 @@ ai:
   prompt_file: /etc/sentinelmilter/detection-prompt.txt
 
   # Maximum duration of one AI request, using Go duration syntax. Must be > 0.
-  timeout: 15s
+  timeout: 45s
 
   # Maximum number of message-text characters supplied to the AI; positive
   # integer. This is separate from milter.max_message_size, which is in bytes.
   max_body_chars: 50000
 
+  # Image-analysis mode: off, fallback, or always. fallback sends qualifying
+  # CID-referenced inline images only when the extracted visible body contains
+  # fewer than vision_min_text_chars characters. The configured model and
+  # endpoint must support image_url content for fallback or always mode.
+  vision_mode: fallback
+  vision_min_text_chars: 200
+
+  # Vision safety and cost limits. SentinelMilter never fetches remote images.
+  # It accepts at most this many locally embedded JPEG, PNG, or GIF images;
+  # each image must be within both the decoded-byte and pixel limits.
+  max_images: 2
+  max_image_bytes: 2097152
+  max_image_pixels: 12000000
+
   # Optional OpenRouter attribution headers. Empty strings disable them.
   # site_url is sent as HTTP-Referer; app_name is sent as X-Title.
-  site_url: ""
+  site_url: https://github.com/PhilAnderson1/SentinelMilter
   app_name: SentinelMilter
 
 policy:
@@ -79,6 +93,51 @@ policy:
   # Text returned with SMTP status 550 5.7.1 when a message is rejected.
   # Keep this on one line; NUL and newline characters are removed.
   reject_message: Message rejected as suspected spam or fraud
+
+  # After an AI-classified message is rejected in enforce mode, add the sending
+  # IP address to a temporary blacklist for the configured time. Further
+  # transactions from that IP are rejected at MAIL FROM without another AI
+  # request. Uses Go duration syntax; 0s disables this feature. The blacklist
+  # is held in memory and cleared when SentinelMilter restarts.
+  rejected_ip_block_duration: 60m
+
+  # Boolean: when true, each rejected delivery attempt from a blacklisted IP
+  # restarts its configured blacklist time. The safer default is false because
+  # repeated traffic could otherwise keep a shared sending IP blocked indefinitely.
+  rejected_ip_refresh_on_attempt: false
+
+  # Maximum cached sending IPs; positive integer. When full, the entry expiring
+  # soonest is removed before a new IP is added.
+  rejected_ip_cache_size: 10000
+
+  # Exact IP addresses or CIDR ranges that must never be added to the rejection
+  # cache. Add trusted relays and shared forwarding services here as needed.
+  rejected_ip_allowlist:
+    - 127.0.0.0/8
+    - ::1/128
+
+  # Reverse-DNS domains whose sending IPs must never be blacklisted. An entry
+  # matches the domain itself and all subdomains: outlook.com therefore matches
+  # outbound.protection.outlook.com. SentinelMilter also resolves the hostname
+  # forward and requires it to contain the connecting IP, preventing a forged
+  # PTR record from bypassing the blacklist.
+  rejected_ip_domain_allowlist:
+    - google.com
+    - outlook.com
+    - yahoo.com
+    - yahoo.net
+    - me.com
+    - icloud.com
+    - messagingengine.com
+    - protonmail.ch
+    - zoho.com
+    - zohomail.com
+    - gmx.net
+    - web.de
+
+  # Maximum time allowed for the reverse and forward DNS checks. This lookup is
+  # performed only after an AI-classified message has already been rejected.
+  rejected_ip_dns_timeout: 5s
 
 logging:
   # Minimum log level: debug, info, warn, or error.

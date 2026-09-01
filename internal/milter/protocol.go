@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net/netip"
 	"strings"
 	"unicode/utf8"
 )
@@ -100,6 +101,26 @@ func parseHeader(payload []byte) (string, string, bool) {
 		return "", "", false
 	}
 	return string(name), string(value), true
+}
+
+func parseConnectIP(payload []byte) (netip.Addr, bool) {
+	_, remainder, found := bytes.Cut(payload, []byte{0})
+	if !found || len(remainder) < 4 {
+		return netip.Addr{}, false
+	}
+	family := remainder[0]
+	if family != '4' && family != '6' {
+		return netip.Addr{}, false
+	}
+	addressBytes := remainder[3:]
+	if len(addressBytes) < 2 || addressBytes[len(addressBytes)-1] != 0 || bytes.IndexByte(addressBytes[:len(addressBytes)-1], 0) >= 0 {
+		return netip.Addr{}, false
+	}
+	addr, err := netip.ParseAddr(string(addressBytes[:len(addressBytes)-1]))
+	if err != nil || (family == '4' && !addr.Is4() && !addr.Is4In6()) || (family == '6' && !addr.Is6()) {
+		return netip.Addr{}, false
+	}
+	return addr.Unmap(), true
 }
 
 func readFrame(reader io.Reader) ([]byte, error) {

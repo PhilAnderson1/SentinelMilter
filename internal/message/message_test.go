@@ -1,9 +1,12 @@
 package message
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
+
+const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 
 func TestPromptDecodesMultipart(t *testing.T) {
 	m := New(10000)
@@ -131,4 +134,97 @@ func TestMalformedHTMLStillPreservesLink(t *testing.T) {
 	if !strings.Contains(prompt, "Click here [link: https://example.invalid]") {
 		t.Fatalf("malformed HTML link missing: %s", prompt)
 	}
+}
+
+func TestVisionFallbackSelectsReferencedInlineImage(t *testing.T) {
+	m := imageOnlyMessage("cid:scam-image", "<scam-image>")
+	analysis := m.BuildAnalysis(1000, VisionOptions{
+		Mode: "fallback", MinTextChars: 200, MaxImages: 2,
+		MaxBytes: 1 << 20, MaxPixels: 100,
+	})
+	if len(analysis.Images) != 1 {
+		t.Fatalf("selected images = %d, want 1; prompt=%s", len(analysis.Images), analysis.Prompt)
+	}
+	if analysis.Images[0].MediaType != "image/png" {
+		t.Fatalf("media type = %q, want image/png", analysis.Images[0].MediaType)
+	}
+	if !strings.Contains(analysis.Prompt, "INLINE EMAIL IMAGES: 1") {
+		t.Fatalf("vision disclosure missing from prompt: %s", analysis.Prompt)
+	}
+}
+
+func TestVisionFallbackIgnoresUnreferencedImage(t *testing.T) {
+	m := imageOnlyMessage("cid:different-image", "<scam-image>")
+	analysis := m.BuildAnalysis(1000, VisionOptions{
+		Mode: "fallback", MinTextChars: 200, MaxImages: 2,
+		MaxBytes: 1 << 20, MaxPixels: 100,
+	})
+	if len(analysis.Images) != 0 {
+		t.Fatalf("selected unreferenced image: %#v", analysis.Images)
+	}
+}
+
+func TestVisionOffAndRemoteImagesAreNeverSelected(t *testing.T) {
+	inline := imageOnlyMessage("cid:scam-image", "<scam-image>")
+	if images := inline.BuildAnalysis(1000, VisionOptions{
+		Mode: "off", MinTextChars: 200, MaxImages: 2, MaxBytes: 1 << 20, MaxPixels: 100,
+	}).Images; len(images) != 0 {
+		t.Fatal("vision mode off selected an inline image")
+	}
+
+	remote := New(10000)
+	remote.AddHeader("Content-Type", "text/html")
+	remote.AddBody([]byte(`<img src="https://tracker.example/image.png">`))
+	if images := remote.BuildAnalysis(1000, VisionOptions{
+		Mode: "always", MaxImages: 2, MaxBytes: 1 << 20, MaxPixels: 100,
+	}).Images; len(images) != 0 {
+		t.Fatal("selected or fetched a remote image")
+	}
+}
+
+func TestVisionFallbackSkipsImageWhenTextIsMeaningful(t *testing.T) {
+	m := imageOnlyMessage("cid:scam-image", "<scam-image>")
+	longText := strings.Repeat("This is meaningful body text. ", 20)
+	m = multipartRelatedMessage(longText, `<p>`+longText+`</p><img src="cid:scam-image">`, "<scam-image>")
+	analysis := m.BuildAnalysis(1000, VisionOptions{
+		Mode: "fallback", MinTextChars: 200, MaxImages: 2,
+		MaxBytes: 1 << 20, MaxPixels: 100,
+	})
+	if len(analysis.Images) != 0 {
+		t.Fatal("fallback mode selected an image despite sufficient visible text")
+	}
+}
+
+func TestVisionImageLimitsAreEnforced(t *testing.T) {
+	m := imageOnlyMessage("cid:scam-image", "<scam-image>")
+	decoded, err := base64.StdEncoding.DecodeString(onePixelPNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis := m.BuildAnalysis(1000, VisionOptions{
+		Mode: "always", MaxImages: 1, MaxBytes: int64(len(decoded) - 1), MaxPixels: 100,
+	})
+	if len(analysis.Images) != 0 {
+		t.Fatal("selected an image exceeding the byte limit")
+	}
+}
+
+func imageOnlyMessage(src, contentID string) *Message {
+	return multipartRelatedMessage("[7d4d-90d5-ef340]", `<img alt="7d4d-90d5-ef340" src="`+src+`">`, contentID)
+}
+
+func multipartRelatedMessage(plain, html, contentID string) *Message {
+	m := New(1 << 20)
+	m.AddHeader("Content-Type", `multipart/related; boundary="outer"`)
+	body := "--outer\r\n" +
+		"Content-Type: multipart/alternative; boundary=\"inner\"\r\n\r\n" +
+		"--inner\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n" + plain + "\r\n" +
+		"--inner\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<html><body>" + html + "</body></html>\r\n" +
+		"--inner--\r\n" +
+		"--outer\r\nContent-Type: image/png; name=notice.png\r\n" +
+		"Content-ID: " + contentID + "\r\nContent-Disposition: inline\r\n" +
+		"Content-Transfer-Encoding: base64\r\n\r\n" + onePixelPNG + "\r\n" +
+		"--outer--\r\n"
+	m.AddBody([]byte(body))
+	return m
 }
