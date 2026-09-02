@@ -30,16 +30,18 @@ type evaluationResult struct {
 }
 
 type Server struct {
-	cfg         config.Config
-	analyzer    Analyzer
-	log         *slog.Logger
-	slots       chan struct{}
-	rejectedIPs *rejectedIPCache
-	wg          sync.WaitGroup
+	cfg            config.Config
+	analyzer       Analyzer
+	log            *slog.Logger
+	slots          chan struct{}
+	ipReputation   *ipReputationStore
+	correspondents *correspondentStore
+	resolver       dnsResolver
+	wg             sync.WaitGroup
 }
 
 func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.Milter.MaxConcurrent), rejectedIPs: newRejectedIPCache(cfg.Policy, log)}
+	return &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.Milter.MaxConcurrent), ipReputation: newIPReputationStore(cfg.Policy, log), correspondents: newCorrespondentStore(cfg.CorrespondentAllowlist, log), resolver: net.DefaultResolver}
 }
 
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
@@ -98,6 +100,7 @@ func (s *Server) evaluate(parent context.Context, msg *message.Message) evaluati
 	for _, image := range analysis.Images {
 		input.Images = append(input.Images, ai.Image{MediaType: image.MediaType, Data: image.Data})
 	}
+	s.logAIInput(msg, input)
 	decision, err := s.analyzer.Analyze(ctx, input)
 	if err != nil {
 		failure := s.analysisFailure(err, started)
@@ -115,6 +118,24 @@ func (s *Server) evaluate(parent context.Context, msg *message.Message) evaluati
 		visionImages:   len(input.Images),
 		latency:        time.Since(started),
 	}
+}
+
+func (s *Server) logAIInput(msg *message.Message, input ai.Input) {
+	if !s.cfg.Logging.IncludeAIInput {
+		return
+	}
+	images := make([]map[string]any, 0, len(input.Images))
+	for _, image := range input.Images {
+		images = append(images, map[string]any{
+			"media_type": image.MediaType,
+			"bytes":      len(image.Data),
+		})
+	}
+	s.log.Debug("AI analysis input",
+		"message_id", msg.Header("Message-ID"),
+		"ai_input", input.Text,
+		"image_count", len(input.Images),
+		"images", images)
 }
 
 func (s *Server) applyPolicy(decision ai.Decision) (action, action) {

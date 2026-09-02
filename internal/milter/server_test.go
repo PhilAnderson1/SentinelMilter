@@ -1,11 +1,14 @@
 package milter
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/PhilAnderson1/SentinelMilter/internal/ai"
 	"github.com/PhilAnderson1/SentinelMilter/internal/config"
+	"github.com/PhilAnderson1/SentinelMilter/internal/message"
 )
 
 type fixedAnalyzer struct {
@@ -23,6 +27,10 @@ type fixedAnalyzer struct {
 type countingAnalyzer struct {
 	decision ai.Decision
 	calls    atomic.Int32
+}
+
+type recordingAnalyzer struct {
+	inputs chan ai.Input
 }
 
 type shortWriter struct {
@@ -44,6 +52,11 @@ func (a fixedAnalyzer) Analyze(context.Context, ai.Input) (ai.Decision, error) {
 func (a *countingAnalyzer) Analyze(context.Context, ai.Input) (ai.Decision, error) {
 	a.calls.Add(1)
 	return a.decision, nil
+}
+
+func (a *recordingAnalyzer) Analyze(_ context.Context, input ai.Input) (ai.Decision, error) {
+	a.inputs <- input
+	return ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}, nil
 }
 
 func testServer(t *testing.T, analyzer Analyzer) (*Server, net.Conn, <-chan struct{}) {
@@ -115,11 +128,165 @@ func sendContinueFrames(t *testing.T, conn net.Conn, frames ...[]byte) {
 }
 
 func connectFrame(family byte, address string) []byte {
+	return connectFrameWithHostname("mail.example", family, address)
+}
+
+func connectFrameWithHostname(hostname string, family byte, address string) []byte {
 	payload := []byte{commandConnect}
-	payload = append(payload, []byte("mail.example\x00")...)
+	payload = append(payload, []byte(hostname+"\x00")...)
 	payload = append(payload, family, 0, 25)
 	payload = append(payload, []byte(address)...)
 	return append(payload, 0)
+}
+
+func macroFrame(target byte, pairs ...string) []byte {
+	payload := []byte{commandMacro, target}
+	for _, value := range pairs {
+		payload = append(payload, []byte(value)...)
+		payload = append(payload, 0)
+	}
+	return payload
+}
+
+func envelopeFrame(command byte, address string) []byte {
+	return append(append([]byte{command}, []byte("<"+address+">")...), 0)
+}
+
+func headerFrame(name, value string) []byte {
+	payload := append([]byte{commandHeader}, []byte(name)...)
+	payload = append(payload, 0)
+	payload = append(payload, []byte(value)...)
+	return append(payload, 0)
+}
+
+func TestConnectionIdentityAndDNSAreSuppliedOncePerConnection(t *testing.T) {
+	analyzer := &recordingAnalyzer{inputs: make(chan ai.Input, 2)}
+	server, conn, done := testServer(t, analyzer)
+	resolver := &connectionTestResolver{
+		ptr:        []string{"dns.google."},
+		forward:    map[string][]net.IPAddr{"dns.google": {{IP: net.ParseIP("8.8.8.8")}}},
+		forwardErr: map[string]error{},
+	}
+	server.resolver = resolver
+	server.cfg.Milter.ConnectionDNSTimeout = config.Duration(time.Second)
+	defer func() {
+		_ = conn.Close()
+		<-done
+	}()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrameWithHostname("mta-claimed.example", '4', "8.8.8.8"),
+		append([]byte{commandHelo}, []byte("helo-claimed.example\x00")...),
+	)
+	for i := 0; i < 2; i++ {
+		sendContinueFrames(t, conn,
+			[]byte{commandMail},
+			[]byte{commandEndHeaders},
+			append([]byte{commandBody}, []byte("test")...),
+		)
+		if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+			t.Fatal(err)
+		}
+		expectFrame(t, conn, string([]byte{responseAccept}))
+		input := <-analyzer.inputs
+		for _, want := range []string{
+			"Remote IP: 8.8.8.8",
+			"MTA-reported client hostname: mta-claimed.example",
+			"Reverse DNS: dns.google (forward-confirmed)",
+			"Forward-confirmed reverse DNS: yes",
+			"SMTP HELO/EHLO identity: helo-claimed.example",
+		} {
+			if !strings.Contains(input.Text, want) {
+				t.Errorf("analysis input missing %q:\n%s", want, input.Text)
+			}
+		}
+	}
+	if got := resolver.ptrCalls.Load(); got != 1 {
+		t.Fatalf("PTR lookups = %d, want exactly 1 for the SMTP connection", got)
+	}
+	if got := resolver.forwardCalls.Load(); got != 1 {
+		t.Fatalf("forward lookups = %d, want exactly 1 for the SMTP connection", got)
+	}
+}
+
+func TestAIInputDiagnosticLoggingIsExplicitAndOmitsImageData(t *testing.T) {
+	msg := message.New(100)
+	msg.AddHeader("Message-ID", "<diagnostic@example.com>")
+	input := ai.Input{
+		Text:   "SELECTED HEADERS:\nAuthentication-Results: mx.example; dkim=pass",
+		Images: []ai.Image{{MediaType: "image/png", Data: []byte("SECRET_IMAGE_BYTES")}},
+	}
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	server := NewServer(config.Config{
+		Milter: config.MilterConfig{MaxConcurrent: 1},
+		Policy: config.PolicyConfig{RejectedIPCacheSize: 1},
+	}, fixedAnalyzer{}, logger)
+
+	server.logAIInput(msg, input)
+	if output.Len() != 0 {
+		t.Fatalf("AI input logged while disabled: %s", output.String())
+	}
+	server.cfg.Logging.IncludeAIInput = true
+	server.logAIInput(msg, input)
+	logged := output.String()
+	for _, want := range []string{
+		`"msg":"AI analysis input"`,
+		`"message_id":"<diagnostic@example.com>"`,
+		`"ai_input":"SELECTED HEADERS:\nAuthentication-Results: mx.example; dkim=pass"`,
+		`"image_count":1`,
+		`"media_type":"image/png"`,
+		`"bytes":18`,
+	} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("diagnostic log missing %s: %s", want, logged)
+		}
+	}
+	if strings.Contains(logged, "SECRET_IMAGE_BYTES") {
+		t.Fatalf("diagnostic log exposed image data: %s", logged)
+	}
+}
+
+func TestRejectedIPDomainAllowlistReusesConnectionDNS(t *testing.T) {
+	server, conn, _ := testServer(t, fixedAnalyzer{decision: ai.Decision{
+		Classification: "scam", Score: 1, Reasons: []string{"test"},
+	}})
+	server.cfg.Milter.ConnectionDNSTimeout = config.Duration(time.Second)
+	server.cfg.Policy.RejectedIPBlockDuration = config.Duration(time.Hour)
+	server.cfg.Policy.RejectedIPCacheSize = 100
+	server.cfg.Policy.RejectedIPDomainAllowlist = []string{"google.com"}
+	server.ipReputation = newIPReputationStore(server.cfg.Policy, server.log)
+	resolver := &connectionTestResolver{
+		ptr: []string{"smtp.google.com."},
+		forward: map[string][]net.IPAddr{
+			"smtp.google.com": {{IP: net.ParseIP("8.8.8.8")}},
+		},
+		forwardErr: map[string]error{},
+	}
+	server.resolver = resolver
+	defer conn.Close()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "8.8.8.8"),
+		[]byte{commandMail},
+		[]byte{commandEndHeaders},
+		append([]byte{commandBody}, []byte("scam")...),
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
+	if _, found := server.ipReputation.lookup(netip.MustParseAddr("8.8.8.8")); found {
+		t.Fatal("forward-confirmed domain-allowlisted IP was added to rejection cache")
+	}
+	if got := resolver.ptrCalls.Load(); got != 1 {
+		t.Fatalf("PTR lookups = %d, want 1", got)
+	}
+	if got := resolver.forwardCalls.Load(); got != 1 {
+		t.Fatalf("forward lookups = %d, want 1", got)
+	}
 }
 
 func TestCommandResponseRequirements(t *testing.T) {
@@ -198,12 +365,445 @@ func TestParseConnectIP(t *testing.T) {
 	}
 }
 
+func TestParseAndCleanConnectAndHELOIdentities(t *testing.T) {
+	frame := connectFrameWithHostname("claimed.example", '4', "192.0.2.25")
+	if got, ok := parseConnectHostname(frame[1:]); !ok || got != "claimed.example" {
+		t.Fatalf("CONNECT hostname = %q, %v", got, ok)
+	}
+	if got, ok := parseSMTPIdentity([]byte("helo.example\x00")); !ok || got != "helo.example" {
+		t.Fatalf("HELO identity = %q, %v", got, ok)
+	}
+	for _, unavailable := range []string{"", "unknown", "[UNKNOWN]", " \tunknown\r\n"} {
+		if got := cleanSMTPIdentity(unavailable); got != "" {
+			t.Errorf("cleanSMTPIdentity(%q) = %q, want unavailable", unavailable, got)
+		}
+	}
+	if got := cleanSMTPIdentity("mx.example\r\nforged"); got != "mx.exampleforged" {
+		t.Errorf("sanitized identity = %q", got)
+	}
+	if _, ok := parseSMTPIdentity([]byte("embedded\x00value\x00")); ok {
+		t.Fatal("accepted HELO identity containing an embedded NUL")
+	}
+}
+
+func TestParseAuthenticationMacro(t *testing.T) {
+	target, identity, found, valid := parseAuthenticationMacro(macroFrame(commandMail,
+		"{auth_type}", "PLAIN", "{auth_authen}", "philip@example.com")[1:])
+	if !valid || !found || target != commandMail || identity != "philip@example.com" {
+		t.Fatalf("parsed macro = target %q identity %q found=%v valid=%v", target, identity, found, valid)
+	}
+	for _, payload := range [][]byte{
+		{},
+		{commandMail, '{', 'a', 'u', 't', 'h', '_', 'a', 'u', 't', 'h', 'e', 'n', '}', 0},
+		macroFrame(commandMail, "{auth_authen}", "first", "{auth_authen}", "second")[1:],
+	} {
+		if _, _, _, valid := parseAuthenticationMacro(payload); valid {
+			t.Errorf("accepted malformed macro payload %q", payload)
+		}
+	}
+}
+
+func TestParseMTAHostnameMacro(t *testing.T) {
+	target, values, valid := parseSessionMacros(macroFrame(commandConnect,
+		"j", "mx.example.com", "{daemon_name}", "smtp")[1:])
+	if !valid || target != commandConnect || !values.MTAHostnameFound || values.MTAHostname != "mx.example.com" {
+		t.Fatalf("parsed macro = target %q values=%#v valid=%v", target, values, valid)
+	}
+}
+
+func TestAuthenticatedMessagesCanBypassAndAuthenticationPersists(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
+	server, conn, _ := testServer(t, analyzer)
+	server.cfg.Policy.ScanAuthenticated = false
+	defer conn.Close()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
+	if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip@example.com")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	for i := 0; i < 2; i++ {
+		sendContinueFrames(t, conn,
+			[]byte{commandMail},
+			[]byte{commandEndHeaders},
+			append([]byte{commandBody}, []byte("outbound message")...),
+		)
+		if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+			t.Fatal(err)
+		}
+		expectFrame(t, conn, string([]byte{responseAccept}))
+	}
+	if got := analyzer.calls.Load(); got != 0 {
+		t.Fatalf("AI analysis calls = %d, want 0", got)
+	}
+
+	if err := writeFrame(conn, []byte{commandQuitConnection}); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		[]byte{commandMail},
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if got := analyzer.calls.Load(); got != 1 {
+		t.Fatalf("AI analysis calls after a new unauthenticated connection = %d, want 1", got)
+	}
+}
+
+func TestAuthenticatedMessagesAreScannedWhenEnabled(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
+	server, conn, _ := testServer(t, analyzer)
+	server.cfg.Policy.ScanAuthenticated = true
+	defer conn.Close()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
+	if err := writeFrame(conn, macroFrame(commandMail, "auth_authen", "philip@example.com")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	sendContinueFrames(t, conn, []byte{commandMail}, []byte{commandEndHeaders})
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if got := analyzer.calls.Load(); got != 1 {
+		t.Fatalf("AI analysis calls = %d, want 1", got)
+	}
+}
+
+func TestAuthenticatedAcceptedMessageLearnsEnvelopeRecipients(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
+	server, conn, _ := testServer(t, analyzer)
+	cfg := config.CorrespondentAllowlistConfig{
+		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100,
+	}
+	server.cfg.Policy.ScanAuthenticated = false
+	server.cfg.CorrespondentAllowlist = cfg
+	server.correspondents = newCorrespondentStore(cfg, server.log)
+	defer conn.Close()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
+	if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	sendContinueFrames(t, conn,
+		envelopeFrame(commandMail, "philip@invades.net"),
+		envelopeFrame(commandRecipient, "alice@example.com"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	deadline := time.Now().Add(time.Second)
+	for {
+		match := server.correspondents.match("alice@example.com", []string{"philip@invades.net"})
+		if match.Known && match.AllRecipientsMatched {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("authenticated recipient was not learned: %#v", match)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := analyzer.calls.Load(); got != 0 {
+		t.Fatalf("AI analysis calls = %d, want 0", got)
+	}
+}
+
+func TestAbortedAuthenticatedMessageDoesNotLearnRecipients(t *testing.T) {
+	analyzer := &countingAnalyzer{}
+	server, conn, _ := testServer(t, analyzer)
+	cfg := config.CorrespondentAllowlistConfig{
+		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100,
+	}
+	server.cfg.CorrespondentAllowlist = cfg
+	server.correspondents = newCorrespondentStore(cfg, server.log)
+	defer conn.Close()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn, connectFrame('4', "127.0.0.1"))
+	if err := writeFrame(conn, macroFrame(commandMail, "{auth_authen}", "philip")); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	sendContinueFrames(t, conn,
+		envelopeFrame(commandMail, "philip@invades.net"),
+		envelopeFrame(commandRecipient, "alice@example.com"),
+	)
+	if err := writeFrame(conn, []byte{commandAbort}); err != nil {
+		t.Fatal(err)
+	}
+	expectNoFrame(t, conn)
+	if match := server.correspondents.match("alice@example.com", []string{"philip@invades.net"}); match.Known {
+		t.Fatalf("aborted recipient was learned: %#v", match)
+	}
+}
+
+func TestKnownCorrespondentIsSuppliedAsAIEvidence(t *testing.T) {
+	analyzer := &recordingAnalyzer{inputs: make(chan ai.Input, 1)}
+	server, conn, done := testServer(t, analyzer)
+	cfg := config.CorrespondentAllowlistConfig{
+		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100,
+	}
+	server.cfg.CorrespondentAllowlist = cfg
+	server.correspondents = newCorrespondentStore(cfg, server.log)
+	if err := server.correspondents.learn("philip@invades.net", []string{"alice@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = conn.Close()
+		<-done
+	}()
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "alice@example.com"),
+		envelopeFrame(commandRecipient, "philip@invades.net"),
+		headerFrame("From", "Alice <alice@example.com>"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	input := <-analyzer.inputs
+	for _, want := range []string{
+		"CORRESPONDENT INFORMATION:",
+		"Known correspondent: yes",
+		"Basis: The visible From address was previously emailed from a relevant local address.",
+		"Sender authentication: no trusted aligned DKIM or DMARC result is available.",
+	} {
+		if !strings.Contains(input.Text, want) {
+			t.Errorf("AI input missing %q:\n%s", want, input.Text)
+		}
+	}
+}
+
+func TestKnownCorrespondentBypassAuthenticationPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		authentication  string
+		secondRecipient string
+		recipientMatch  string
+		requireDKIM     bool
+		wantAICalls     int32
+	}{
+		{name: "trusted aligned DKIM required", authentication: "nl.invades.net; dkim=pass header.d=example.com", recipientMatch: "all", requireDKIM: true, wantAICalls: 0},
+		{name: "untrusted DKIM required", authentication: "attacker.example; dkim=pass header.d=example.com", recipientMatch: "all", requireDKIM: true, wantAICalls: 1},
+		{name: "DMARC is insufficient when DKIM required", authentication: "nl.invades.net; dmarc=pass header.from=example.com", recipientMatch: "all", requireDKIM: true, wantAICalls: 1},
+		{name: "no authentication required", authentication: "", recipientMatch: "all", requireDKIM: false, wantAICalls: 0},
+		{name: "partial match requiring all", authentication: "", secondRecipient: "other@invades.net", recipientMatch: "all", requireDKIM: false, wantAICalls: 1},
+		{name: "partial match requiring any", authentication: "", secondRecipient: "other@invades.net", recipientMatch: "any", requireDKIM: false, wantAICalls: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
+			server, conn, done := testServer(t, analyzer)
+			cfg := config.CorrespondentAllowlistConfig{
+				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: test.recipientMatch, BypassAI: true,
+				RequireDKIMForBypass: test.requireDKIM,
+				File:                 filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
+			}
+			server.cfg.CorrespondentAllowlist = cfg
+			server.correspondents = newCorrespondentStore(cfg, server.log)
+			if err := server.correspondents.learn("philip@invades.net", []string{"alice@example.com"}); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_ = conn.Close()
+				<-done
+			}()
+			negotiate(t, conn)
+			frames := [][]byte{
+				connectFrame('4', "127.0.0.1"),
+				envelopeFrame(commandMail, "alice@example.com"),
+				envelopeFrame(commandRecipient, "philip@invades.net"),
+			}
+			if test.secondRecipient != "" {
+				frames = append(frames, envelopeFrame(commandRecipient, test.secondRecipient))
+			}
+			frames = append(frames,
+				headerFrame("From", "Alice <alice@example.com>"),
+				headerFrame("Authentication-Results", test.authentication),
+				[]byte{commandEndHeaders},
+			)
+			sendContinueFrames(t, conn, frames...)
+			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+				t.Fatal(err)
+			}
+			expectFrame(t, conn, string([]byte{responseAccept}))
+			if got := analyzer.calls.Load(); got != test.wantAICalls {
+				t.Fatalf("AI analysis calls = %d, want %d", got, test.wantAICalls)
+			}
+		})
+	}
+}
+
+func TestMTAHostnameMacroExpandsTrustedAuthenticationService(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		mtaHostname string
+		wantAICalls int32
+	}{
+		{name: "matching MTA hostname", mtaHostname: "NL.Invades.Net.", wantAICalls: 0},
+		{name: "missing MTA hostname", wantAICalls: 1},
+		{name: "invalid MTA hostname", mtaHostname: "not a hostname!", wantAICalls: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
+			server, conn, done := testServer(t, analyzer)
+			cfg := config.CorrespondentAllowlistConfig{
+				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+				BypassAI: true, RequireDKIMForBypass: true, File: filepath.Join(t.TempDir(), "allowlist.json"),
+				MaxEntries: 100, TrustedAuthservIDs: []string{config.MTAHostnameAuthservID},
+			}
+			server.cfg.CorrespondentAllowlist = cfg
+			server.correspondents = newCorrespondentStore(cfg, server.log)
+			if err := server.correspondents.learn("philip@invades.net", []string{"alice@example.com"}); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_ = conn.Close()
+				<-done
+			}()
+			negotiate(t, conn)
+			if test.mtaHostname != "" {
+				if err := writeFrame(conn, macroFrame(commandConnect, "j", test.mtaHostname)); err != nil {
+					t.Fatal(err)
+				}
+				expectNoFrame(t, conn)
+			}
+			sendContinueFrames(t, conn,
+				connectFrame('4', "127.0.0.1"),
+				envelopeFrame(commandMail, "alice@example.com"),
+				envelopeFrame(commandRecipient, "philip@invades.net"),
+				headerFrame("From", "Alice <alice@example.com>"),
+				headerFrame("Authentication-Results", "nl.invades.net; dkim=pass header.d=example.com"),
+				[]byte{commandEndHeaders},
+			)
+			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+				t.Fatal(err)
+			}
+			expectFrame(t, conn, string([]byte{responseAccept}))
+			if got := analyzer.calls.Load(); got != test.wantAICalls {
+				t.Fatalf("AI analysis calls = %d, want %d", got, test.wantAICalls)
+			}
+		})
+	}
+}
+
+func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		authentication string
+		requireDKIM    bool
+		wantRefresh    bool
+	}{
+		{name: "unauthenticated bypass is not refreshed", requireDKIM: false},
+		{name: "trusted DKIM bypass is refreshed", authentication: "nl.invades.net; dkim=pass header.d=example.com", requireDKIM: true, wantRefresh: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
+			server, conn, done := testServer(t, analyzer)
+			cfg := config.CorrespondentAllowlistConfig{
+				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+				BypassAI: true, RequireDKIMForBypass: test.requireDKIM, File: filepath.Join(t.TempDir(), "allowlist.json"),
+				MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
+			}
+			server.cfg.CorrespondentAllowlist = cfg
+			server.correspondents = newCorrespondentStore(cfg, server.log)
+			learnedAt := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+			server.correspondents.now = func() time.Time { return learnedAt }
+			if err := server.correspondents.learn("philip@invades.net", []string{"alice@example.com"}); err != nil {
+				t.Fatal(err)
+			}
+			activityAt := learnedAt.Add(time.Hour)
+			server.correspondents.now = func() time.Time { return activityAt }
+			negotiate(t, conn)
+			sendContinueFrames(t, conn,
+				connectFrame('4', "127.0.0.1"),
+				envelopeFrame(commandMail, "alice@example.com"),
+				envelopeFrame(commandRecipient, "philip@invades.net"),
+				headerFrame("From", "Alice <alice@example.com>"),
+				headerFrame("Authentication-Results", test.authentication),
+				[]byte{commandEndHeaders},
+			)
+			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+				t.Fatal(err)
+			}
+			expectFrame(t, conn, string([]byte{responseAccept}))
+			_ = conn.Close()
+			<-done
+			server.correspondents.mu.RLock()
+			activity := server.correspondents.entries[server.correspondents.key("philip@invades.net", "alice@example.com")].LastActivityAt
+			server.correspondents.mu.RUnlock()
+			want := learnedAt
+			if test.wantRefresh {
+				want = activityAt
+			}
+			if !activity.Equal(want) {
+				t.Fatalf("last activity = %s, want %s", activity, want)
+			}
+			if got := analyzer.calls.Load(); got != 0 {
+				t.Fatalf("AI analysis calls = %d, want bypass", got)
+			}
+		})
+	}
+}
+
+func TestAIResultLearnsInboundSender(t *testing.T) {
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
+	server, conn, done := testServer(t, analyzer)
+	cfg := config.CorrespondentAllowlistConfig{
+		LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
+		LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
+		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
+	}
+	server.cfg.CorrespondentAllowlist = cfg
+	server.correspondents = newCorrespondentStore(cfg, server.log)
+
+	negotiate(t, conn)
+	sendContinueFrames(t, conn,
+		connectFrame('4', "127.0.0.1"),
+		envelopeFrame(commandMail, "news@example.com"),
+		envelopeFrame(commandRecipient, "philip@invades.net"),
+		headerFrame("From", "News <news@example.com>"),
+		headerFrame("Authentication-Results", "nl.invades.net; dkim=pass header.d=example.com"),
+		[]byte{commandEndHeaders},
+	)
+	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+		t.Fatal(err)
+	}
+	expectFrame(t, conn, string([]byte{responseAccept}))
+	if err := writeFrame(conn, []byte{commandQuit}); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	_ = conn.Close()
+	if match := server.correspondents.match("news@example.com", []string{"philip@invades.net"}); !match.Known {
+		t.Fatal("qualifying AI result did not create a known correspondent")
+	}
+}
+
 func TestRejectedIPBypassesSecondAIAnalysis(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "scam", Score: 1, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
 	server.cfg.Policy.RejectedIPBlockDuration = config.Duration(15 * time.Minute)
 	server.cfg.Policy.RejectedIPCacheSize = 100
-	server.rejectedIPs = newRejectedIPCache(server.cfg.Policy, server.log)
+	server.ipReputation = newIPReputationStore(server.cfg.Policy, server.log)
 	defer conn.Close()
 
 	negotiate(t, conn)
@@ -237,177 +837,6 @@ func TestRejectedIPBypassesSecondAIAnalysis(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("handler did not exit after quit")
-	}
-}
-
-func TestMalformedOptionNegotiationClosesConnection(t *testing.T) {
-	_, conn, done := testServer(t, fixedAnalyzer{})
-	defer conn.Close()
-	if err := writeFrame(conn, []byte{commandOptionNegotiation, 0, 0, 0, 6}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readFrame(conn); err == nil {
-		t.Fatal("expected malformed negotiation to close the connection")
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not exit after malformed negotiation")
-	}
-}
-
-func TestProtocolRejectsInvalidSequences(t *testing.T) {
-	tests := []struct {
-		name    string
-		setup   [][]byte
-		invalid []byte
-	}{
-		{name: "header before mail", invalid: []byte{commandHeader}},
-		{name: "body before end headers", setup: [][]byte{{commandMail}}, invalid: []byte{commandBody}},
-		{name: "end body before end headers", setup: [][]byte{{commandMail}}, invalid: []byte{commandEndBody}},
-		{name: "helo during message", setup: [][]byte{{commandMail}}, invalid: []byte{commandHelo}},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, conn, done := testServer(t, fixedAnalyzer{})
-			defer conn.Close()
-			negotiate(t, conn)
-			sendContinueFrames(t, conn, test.setup...)
-			if err := writeFrame(conn, test.invalid); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := readFrame(conn); err == nil {
-				t.Fatal("expected invalid sequence to close the connection")
-			}
-			select {
-			case <-done:
-			case <-time.After(time.Second):
-				t.Fatal("handler did not exit after invalid sequence")
-			}
-		})
-	}
-}
-
-func TestAbortDoesNotDesynchronizeNextTransaction(t *testing.T) {
-	_, conn, done := testServer(t, fixedAnalyzer{decision: ai.Decision{
-		Classification: "scam", Score: 1, Reasons: []string{"test"},
-	}})
-	defer conn.Close()
-	negotiate(t, conn)
-	if err := writeFrame(conn, []byte{commandMail}); err != nil {
-		t.Fatal(err)
-	}
-	expectFrame(t, conn, "c")
-
-	if err := writeFrame(conn, []byte{commandAbort}); err != nil {
-		t.Fatal(err)
-	}
-	expectNoFrame(t, conn)
-
-	for _, frame := range [][]byte{
-		{commandHelo},
-		{commandMail},
-		append([]byte{commandHeader}, []byte("Subject\x00test\x00")...),
-		{commandEndHeaders},
-		append([]byte{commandBody}, []byte("test body")...),
-	} {
-		if err := writeFrame(conn, frame); err != nil {
-			t.Fatal(err)
-		}
-		expectFrame(t, conn, "c")
-	}
-	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
-		t.Fatal(err)
-	}
-	expectFrame(t, conn, "y550 5.7.1 blocked\x00")
-
-	if err := writeFrame(conn, []byte{commandQuit}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not exit after quit")
-	}
-}
-
-func TestUnsupportedCommandClosesConnection(t *testing.T) {
-	_, conn, done := testServer(t, fixedAnalyzer{})
-	defer conn.Close()
-	if err := writeFrame(conn, []byte{'Z'}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readFrame(conn); err == nil || !strings.Contains(err.Error(), "EOF") {
-		t.Fatalf("expected connection close, got %v", err)
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not exit for unsupported command")
-	}
-}
-
-func TestHandleKeepsConnectionAfterIdleTimeout(t *testing.T) {
-	serverConn, clientConn := net.Pipe()
-	defer clientConn.Close()
-
-	s := &Server{
-		cfg: config.Config{
-			Milter: config.MilterConfig{Timeout: config.Duration(20 * time.Millisecond)},
-		},
-		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		defer serverConn.Close()
-		s.handle(context.Background(), serverConn)
-	}()
-
-	// Wait through several idle deadlines before sending a command. Postfix
-	// keeps milter connections open and may reuse them after an idle period.
-	time.Sleep(75 * time.Millisecond)
-	negotiate(t, clientConn)
-	if err := writeFrame(clientConn, []byte{commandHelo}); err != nil {
-		t.Fatalf("write command after idle period: %v", err)
-	}
-	reply, err := readFrame(clientConn)
-	if err != nil {
-		t.Fatalf("read reply after idle period: %v", err)
-	}
-	if len(reply) != 1 || reply[0] != 'c' {
-		t.Fatalf("unexpected reply: %q", reply)
-	}
-
-	if err := writeFrame(clientConn, []byte{commandQuit}); err != nil {
-		t.Fatalf("write quit: %v", err)
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler did not exit after quit")
-	}
-}
-
-func TestHandleClosesAfterPartialFrameTimeout(t *testing.T) {
-	serverConn, clientConn := net.Pipe()
-	defer clientConn.Close()
-	s := &Server{cfg: config.Config{Milter: config.MilterConfig{Timeout: config.Duration(20 * time.Millisecond)}}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		defer serverConn.Close()
-		s.handle(context.Background(), serverConn)
-	}()
-
-	if _, err := clientConn.Write([]byte{0, 0}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("handler retained a connection after a partial-frame timeout")
 	}
 }
 

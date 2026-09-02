@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/PhilAnderson1/SentinelMilter/internal/ai"
 	"github.com/PhilAnderson1/SentinelMilter/internal/config"
@@ -21,6 +22,8 @@ import (
 func main() {
 	configPath := flag.String("config", "/etc/sentinelmilter/sentinelmilter.yaml", "configuration file")
 	check := flag.Bool("check-config", false, "validate configuration and exit")
+	whitelistAdd := flag.String("whitelist-add", "", "manually whitelist sender for one recipient (service must be stopped)")
+	whitelistDelete := flag.String("whitelist-del", "", "delete sender whitelist entry; recipient may be * (service must be stopped)")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -29,8 +32,51 @@ func main() {
 		os.Exit(2)
 	}
 	if *check {
+		if *whitelistAdd != "" || *whitelistDelete != "" || len(flag.Args()) != 0 {
+			fmt.Fprintln(os.Stderr, "--check-config cannot be combined with whitelist operations")
+			os.Exit(2)
+		}
 		fmt.Println("configuration is valid")
 		return
+	}
+	if *whitelistAdd != "" || *whitelistDelete != "" {
+		if *whitelistAdd != "" && *whitelistDelete != "" {
+			fmt.Fprintln(os.Stderr, "specify only one of --whitelist-add or --whitelist-del")
+			os.Exit(2)
+		}
+		if len(flag.Args()) != 1 {
+			fmt.Fprintln(os.Stderr, "whitelist operation requires sender and recipient arguments")
+			os.Exit(2)
+		}
+		if milterListenerActive(cfg.Milter.Socket) {
+			fmt.Fprintln(os.Stderr, "SentinelMilter appears to be running; stop it before modifying the whitelist")
+			os.Exit(1)
+		}
+		recipient := flag.Args()[0]
+		if *whitelistAdd != "" {
+			created, err := milter.AddManualCorrespondent(cfg.CorrespondentAllowlist, *whitelistAdd, recipient)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "cannot add whitelist entry:", err)
+				os.Exit(1)
+			}
+			result := "updated"
+			if created {
+				result = "added"
+			}
+			fmt.Printf("whitelist entry %s: sender=%s recipient=%s\n", result, *whitelistAdd, recipient)
+			return
+		}
+		removed, err := milter.DeleteCorrespondents(cfg.CorrespondentAllowlist, *whitelistDelete, recipient)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "cannot delete whitelist entry:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("whitelist entries deleted: %d\n", removed)
+		return
+	}
+	if len(flag.Args()) != 0 {
+		fmt.Fprintln(os.Stderr, "unexpected positional arguments")
+		os.Exit(2)
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel()}))
@@ -56,6 +102,29 @@ func main() {
 		logger.Error("milter server stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+func milterListenerActive(address string) bool {
+	return milterListenerActiveUsing(address, net.DialTimeout)
+}
+
+func milterListenerActiveUsing(address string, dial func(string, string, time.Duration) (net.Conn, error)) bool {
+	network := ""
+	target := ""
+	switch {
+	case strings.HasPrefix(address, "unix:"):
+		network, target = "unix", strings.TrimPrefix(address, "unix:")
+	case strings.HasPrefix(address, "tcp:"):
+		network, target = "tcp", strings.TrimPrefix(address, "tcp:")
+	default:
+		return false
+	}
+	conn, err := dial(network, target, 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func listen(address string) (net.Listener, func(), error) {

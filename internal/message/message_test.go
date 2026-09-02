@@ -19,6 +19,69 @@ func TestPromptDecodesMultipart(t *testing.T) {
 	}
 }
 
+func TestConnectionInformationPrecedesHeadersAndReportsDNSPrecisely(t *testing.T) {
+	m := New(1000)
+	m.Connection = ConnectionInfo{
+		RemoteIP:            "92.205.185.174",
+		MTAReportedHostname: "174.185.205.92.host.secureserver.net",
+		HELOIdentity:        "mx.example.com",
+		ReverseDNSStatus:    ReverseDNSAvailable,
+		ReverseDNS: []ReverseDNSName{
+			{Hostname: "174.185.205.92.host.secureserver.net", Confirmation: ForwardConfirmed},
+			{Hostname: "other.example", Confirmation: ForwardUnconfirmed},
+		},
+	}
+	m.AddHeader("Subject", "test")
+	prompt := m.Prompt(100)
+	for _, want := range []string{
+		"CONNECTION INFORMATION:",
+		"Remote IP: 92.205.185.174",
+		"MTA-reported client hostname: 174.185.205.92.host.secureserver.net",
+		"Reverse DNS: 174.185.205.92.host.secureserver.net (forward-confirmed), other.example (unconfirmed)",
+		"Forward-confirmed reverse DNS: yes",
+		"SMTP HELO/EHLO identity: mx.example.com",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Index(prompt, "CONNECTION INFORMATION:") > strings.Index(prompt, "SELECTED HEADERS:") {
+		t.Fatalf("connection information does not precede headers:\n%s", prompt)
+	}
+}
+
+func TestConnectionInformationDistinguishesAbsentFailureAndUnavailable(t *testing.T) {
+	tests := []struct {
+		status string
+		want   string
+	}{
+		{ReverseDNSAbsent, "Reverse DNS: none\nForward-confirmed reverse DNS: not applicable"},
+		{ReverseDNSLookupFailed, "Reverse DNS: lookup failed\nForward-confirmed reverse DNS: unknown"},
+		{ReverseDNSNotApplicable, "Reverse DNS: not applicable\nForward-confirmed reverse DNS: not applicable"},
+	}
+	for _, test := range tests {
+		m := New(100)
+		m.Connection.ReverseDNSStatus = test.status
+		prompt := m.Prompt(10)
+		if !strings.Contains(prompt, "Remote IP: unavailable") || !strings.Contains(prompt, test.want) {
+			t.Errorf("status %q formatted incorrectly:\n%s", test.status, prompt)
+		}
+	}
+}
+
+func TestConnectionInformationSanitizesAndBoundsUntrustedValues(t *testing.T) {
+	m := New(100)
+	m.Connection = ConnectionInfo{
+		RemoteIP:            strings.Repeat("a", maxConnectionValueRunes+20) + "\nINJECTED:",
+		MTAReportedHostname: "host.example\r\nSubject: forged",
+		HELOIdentity:        "helo.example\x00bad",
+	}
+	prompt := m.Prompt(10)
+	if strings.Contains(prompt, "\r") || strings.Contains(prompt, "\x00") || strings.Contains(prompt, "\nINJECTED:") || strings.Contains(prompt, "\nSubject: forged") {
+		t.Fatalf("connection metadata was not sanitized:\n%s", prompt)
+	}
+}
+
 func TestMultipartAlternativePrefersHTML(t *testing.T) {
 	m := New(10000)
 	m.AddHeader("Content-Type", `multipart/alternative; boundary="x"`)

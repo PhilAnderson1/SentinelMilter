@@ -1,0 +1,357 @@
+package milter
+
+import (
+	"encoding/json"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/PhilAnderson1/SentinelMilter/internal/config"
+)
+
+func TestCorrespondentStorePersistsPerSenderRelationships(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.json")
+	cfg := config.CorrespondentAllowlistConfig{
+		LearnAuthenticatedRecipients: true,
+		UseAllowlist:                 true,
+		Scope:                        "per_sender",
+		File:                         path,
+		MaxEntries:                   10,
+	}
+	store := newCorrespondentStore(cfg, slog.Default())
+	if err := store.learn("Owner@Example.COM", []string{"Alice@Example.net", "alice@example.net", "invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	if mode := fileMode(t, path); mode.Perm() != 0640 {
+		t.Fatalf("database permissions = %o, want 0640", mode.Perm())
+	}
+	reloaded := newCorrespondentStore(cfg, slog.Default())
+	if match := reloaded.match("alice@example.net", []string{"owner@example.com"}); !match.Known || !match.AllRecipientsMatched {
+		t.Fatalf("saved relationship did not reload: %#v", match)
+	}
+	if match := reloaded.match("alice@example.net", []string{"other@example.com"}); match.Known {
+		t.Fatalf("per-sender relationship leaked to another user: %#v", match)
+	}
+}
+
+func TestCorrespondentStoreMigratesLegacyEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.json")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	learnedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	legacy := correspondentFile{Version: legacyCorrespondentFileVersion, Entries: []correspondentEntry{{
+		LocalAddress: "owner@example.com", Correspondent: "alice@example.net", LearnedAt: learnedAt,
+	}}}
+	if err := json.NewEncoder(file).Encode(legacy); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.CorrespondentAllowlistConfig{
+		UseAllowlist: true, Scope: "per_sender", LegitimateSenderMinMessages: 5,
+		File: path, MaxEntries: 10,
+	}
+	store := newCorrespondentStore(cfg, slog.Default())
+	if !store.match("alice@example.net", []string{"owner@example.com"}).Known {
+		t.Fatal("legacy relationship was not retained as authenticated outbound")
+	}
+	migrated := readCorrespondentFile(t, path)
+	if migrated.Version != correspondentFileVersion || len(migrated.Entries) != 1 {
+		t.Fatalf("migrated file = %#v", migrated)
+	}
+	entry := migrated.Entries[0]
+	if entry.WhitelistType != whitelistAuthenticatedOutbound || !entry.LastActivityAt.Equal(learnedAt) {
+		t.Fatalf("migrated entry = %#v", entry)
+	}
+}
+
+func TestCorrespondentStoreScopeChangesOnlyMatching(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.json")
+	globalConfig := config.CorrespondentAllowlistConfig{
+		LearnAuthenticatedRecipients: true,
+		UseAllowlist:                 true,
+		Scope:                        "global",
+		File:                         path,
+		MaxEntries:                   10,
+	}
+	store := newCorrespondentStore(globalConfig, slog.Default())
+	if err := store.learn("owner@example.com", []string{"alice@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	if match := store.match("alice@example.net", []string{"anyone@example.com"}); !match.Known || !match.AllRecipientsMatched {
+		t.Fatalf("global relationship did not match: %#v", match)
+	}
+
+	perSenderConfig := globalConfig
+	perSenderConfig.Scope = "per_sender"
+	perSender := newCorrespondentStore(perSenderConfig, slog.Default())
+	if match := perSender.match("alice@example.net", []string{"owner@example.com"}); !match.Known || !match.AllRecipientsMatched {
+		t.Fatalf("relationship was not retained when switching to per-sender matching: %#v", match)
+	}
+	if match := perSender.match("alice@example.net", []string{"anyone@example.com"}); match.Known {
+		t.Fatalf("global learning discarded the local sender relationship: %#v", match)
+	}
+}
+
+func TestCorrespondentStoreEvictsOldestAtCapacity(t *testing.T) {
+	store := newCorrespondentStore(config.CorrespondentAllowlistConfig{
+		LearnAuthenticatedRecipients: true,
+		UseAllowlist:                 true,
+		Scope:                        "global",
+		File:                         filepath.Join(t.TempDir(), "allowlist.json"),
+		MaxEntries:                   1,
+	}, slog.Default())
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	if err := store.learn("owner@example.com", []string{"first@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	if err := store.learn("owner@example.com", []string{"second@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	if store.match("first@example.net", nil).Known || !store.match("second@example.net", nil).Known {
+		t.Fatal("capacity eviction did not retain the newest relationship")
+	}
+}
+
+func TestCorrespondentStoreEvictsLeastRecentlyActive(t *testing.T) {
+	store := newCorrespondentStore(config.CorrespondentAllowlistConfig{
+		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "global",
+		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 2,
+	}, slog.Default())
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	if err := store.learn("owner@example.com", []string{"first@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if err := store.learn("owner@example.com", []string{"second@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if err := store.learn("owner@example.com", []string{"first@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if err := store.learn("owner@example.com", []string{"third@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	if !store.match("first@example.net", nil).Known || store.match("second@example.net", nil).Known || !store.match("third@example.net", nil).Known {
+		t.Fatal("capacity eviction did not retain the most recently active relationships")
+	}
+}
+
+func TestCorrespondentStoreRemovesStaleRelationships(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.json")
+	store := newCorrespondentStore(config.CorrespondentAllowlistConfig{
+		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "global",
+		File: path, MaxEntries: 10, StaleAfter: config.Duration(24 * time.Hour),
+	}, slog.Default())
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	if err := store.learn("owner@example.com", []string{"alice@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(25 * time.Hour)
+	if store.match("alice@example.net", nil).Known {
+		t.Fatal("stale relationship still matched")
+	}
+	if entries := readCorrespondentFile(t, path).Entries; len(entries) != 0 {
+		t.Fatalf("persisted stale relationships = %d, want 0", len(entries))
+	}
+}
+
+func TestCorrespondentActivityPersistenceIsThrottled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.json")
+	store := newCorrespondentStore(config.CorrespondentAllowlistConfig{
+		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender",
+		File: path, MaxEntries: 10, ActivityUpdateInterval: config.Duration(24 * time.Hour),
+	}, slog.Default())
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	if err := store.learn("owner@example.com", []string{"alice@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	initial := readCorrespondentFile(t, path).Entries[0].LastActivityAt
+	now = now.Add(time.Hour)
+	if err := store.touchInbound("alice@example.net", []string{"owner@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if persisted := readCorrespondentFile(t, path).Entries[0].LastActivityAt; !persisted.Equal(initial) {
+		t.Fatalf("activity persisted before update interval: %s", persisted)
+	}
+	now = now.Add(24 * time.Hour)
+	if err := store.touchInbound("alice@example.net", []string{"owner@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if persisted := readCorrespondentFile(t, path).Entries[0].LastActivityAt; !persisted.Equal(now) {
+		t.Fatalf("persisted activity = %s, want %s", persisted, now)
+	}
+}
+
+func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.json")
+	cfg := config.CorrespondentAllowlistConfig{
+		LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true, UseAllowlist: true,
+		Scope: "per_sender", LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .99,
+		LegitimateSenderRequireDKIM: true, File: path, MaxEntries: 10,
+	}
+	store := newCorrespondentStore(cfg, slog.Default())
+	record := func(classification string, score float64, dkim bool) {
+		t.Helper()
+		if err := store.recordInboundClassification("news@example.net", []string{"owner@example.com"}, true, classification, score, .9, dkim); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record("legitimate", 1, false)
+	if len(store.entries) != 0 {
+		t.Fatal("message without required DKIM created a candidate")
+	}
+	record("legitimate", 1, true)
+	key := store.key("owner@example.com", "news@example.net")
+	if entry := store.entries[key]; entry.LegitimateEmailCount != 1 || store.qualified(entry) {
+		t.Fatalf("first candidate result = %#v", entry)
+	}
+	record("legitimate", .9, true)
+	record("uncertain", 1, true)
+	if count := store.entries[key].LegitimateEmailCount; count != 1 {
+		t.Fatalf("neutral results changed count to %d", count)
+	}
+	record("legitimate", 1, true)
+	record("legitimate", 1, true)
+	if match := store.match("news@example.net", []string{"owner@example.com"}); !match.Known {
+		t.Fatal("threshold-qualified inbound sender is not known")
+	}
+	record("spam", .89, true)
+	if _, exists := store.entries[key]; !exists {
+		t.Fatal("below-threshold spam classification deleted inbound-learned entry")
+	}
+	record("spam", .9, true)
+	if _, exists := store.entries[key]; exists {
+		t.Fatal("spam classification did not delete inbound-learned entry")
+	}
+
+	record("legitimate", 1, true)
+	if err := store.learn("owner@example.com", []string{"news@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	entry := store.entries[key]
+	if entry.WhitelistType != whitelistAuthenticatedOutbound || entry.LegitimateEmailCount != 0 || !store.qualified(entry) {
+		t.Fatalf("authenticated outbound promotion = %#v", entry)
+	}
+	record("scam", 1, true)
+	if _, exists := store.entries[key]; !exists {
+		t.Fatal("scam classification deleted authenticated-outbound entry")
+	}
+}
+
+func TestCorrespondentCapacityEvictsCandidateBeforeQualifiedEntry(t *testing.T) {
+	store := newCorrespondentStore(config.CorrespondentAllowlistConfig{
+		LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true, UseAllowlist: true,
+		Scope: "per_sender", LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .99,
+		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 2,
+	}, slog.Default())
+	if err := store.learn("owner@example.com", []string{"trusted@example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.recordInboundClassification("candidate1@example.net", []string{"owner@example.com"}, true, "legitimate", 1, .9, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.recordInboundClassification("candidate2@example.net", []string{"owner@example.com"}, true, "legitimate", 1, .9, true); err != nil {
+		t.Fatal(err)
+	}
+	if !store.match("trusted@example.net", []string{"owner@example.com"}).Known {
+		t.Fatal("candidate evicted a qualified authenticated-outbound relationship")
+	}
+	if _, exists := store.entries[store.key("owner@example.com", "candidate1@example.net")]; exists {
+		t.Fatal("old candidate was not evicted first")
+	}
+}
+
+func TestManualCorrespondentManagement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.json")
+	cfg := config.CorrespondentAllowlistConfig{
+		UseAllowlist: true, Scope: "per_sender", LegitimateSenderMinMessages: 5,
+		File: path, MaxEntries: 10,
+	}
+	created, err := AddManualCorrespondent(cfg, "News@Example.NET", "Owner@Example.COM")
+	if err != nil || !created {
+		t.Fatalf("manual add: created=%v err=%v", created, err)
+	}
+	created, err = AddManualCorrespondent(cfg, "news@example.net", "owner@example.com")
+	if err != nil || created {
+		t.Fatalf("manual update: created=%v err=%v", created, err)
+	}
+	data := readCorrespondentFile(t, path)
+	if len(data.Entries) != 1 || data.Entries[0].WhitelistType != whitelistManual || data.Entries[0].LegitimateEmailCount != 0 {
+		t.Fatalf("manual entry = %#v", data.Entries)
+	}
+	store := newCorrespondentStore(cfg, slog.Default())
+	if !store.match("news@example.net", []string{"owner@example.com"}).Known {
+		t.Fatal("manual entry is not immediately qualified")
+	}
+	if _, err := AddManualCorrespondent(cfg, "news@example.net", "second@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := DeleteCorrespondents(cfg, "news@example.net", "owner@example.com")
+	if err != nil || removed != 1 {
+		t.Fatalf("exact delete: removed=%d err=%v", removed, err)
+	}
+	removed, err = DeleteCorrespondents(cfg, "news@example.net", "*")
+	if err != nil || removed != 1 {
+		t.Fatalf("wildcard delete: removed=%d err=%v", removed, err)
+	}
+	if entries := readCorrespondentFile(t, path).Entries; len(entries) != 0 {
+		t.Fatalf("entries remain after deletion: %#v", entries)
+	}
+}
+
+func TestManualCorrespondentOverridesInboundCandidate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "allowlist.json")
+	cfg := config.CorrespondentAllowlistConfig{
+		LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender",
+		LegitimateSenderMinMessages: 5, LegitimateSenderMinScore: .99,
+		File: path, MaxEntries: 10,
+	}
+	store := newCorrespondentStore(cfg, slog.Default())
+	if err := store.recordInboundClassification("news@example.net", []string{"owner@example.com"}, true, "legitimate", 1, .9, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AddManualCorrespondent(cfg, "news@example.net", "owner@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	entry := readCorrespondentFile(t, path).Entries[0]
+	if entry.WhitelistType != whitelistManual || entry.LegitimateEmailCount != 0 {
+		t.Fatalf("candidate was not promoted to manual: %#v", entry)
+	}
+}
+
+func readCorrespondentFile(t *testing.T, path string) correspondentFile {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	var data correspondentFile
+	if err := json.NewDecoder(file).Decode(&data); err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func fileMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode()
+}

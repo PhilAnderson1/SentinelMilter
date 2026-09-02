@@ -18,10 +18,12 @@ milter:
   # A Unix socket may be used instead: unix:/run/sentinelmilter/sentinelmilter.sock
   socket: tcp:127.0.0.1:8895
 
-  # Idle/protocol I/O timeout. Uses Go duration syntax, for example 30s,
-  # 2m, or 1m30s. During analysis SentinelMilter automatically uses this value
-  # or ai.timeout plus a response-writing margin, whichever is longer.
+  # Milter protocol I/O timeout. Uses Go duration syntax, for example 30s,
+  # 2m, or 1m30s.
   timeout: 1m
+
+  # Maximum time for DNS lookups (DNS evidence is used by the AI to classify emails).
+  connection_dns_timeout: 2s
 
   # Maximum message body bytes retained for analysis; positive integer.
   # Larger messages are truncated and the decision log records truncated=true.
@@ -47,8 +49,8 @@ ai:
   # provider/model names; llama.cpp may use its configured model name or path.
   model: qwen/qwen3.6-35b-a3b
 
-  # Boolean: true or false. When true, send both llama.cpp's
-  # thinking_budget_tokens: 0 and OpenRouter's reasoning.effort: none.
+  # Boolean: true or false. When true, send both llama.cpp- and
+  # OpenRouter-compatible controls to disable model reasoning.
   disable_thinking: true
 
   # Absolute path to the system prompt used for every classification.
@@ -61,16 +63,14 @@ ai:
   # integer. This is separate from milter.max_message_size, which is in bytes.
   max_body_chars: 50000
 
-  # Image-analysis mode: off, fallback, or always. fallback sends qualifying
-  # CID-referenced inline images only when the extracted visible body contains
-  # fewer than vision_min_text_chars characters. The configured model and
-  # endpoint must support image_url content for fallback or always mode.
+  # Image analysis detects scams concealed in images to evade text-based filtering.
+  # Modes: off, fallback, or always. fallback analyses inline images only when
+  # insufficient body text is available. Requires a vision-capable model.
   vision_mode: fallback
   vision_min_text_chars: 200
 
-  # Vision safety and cost limits. SentinelMilter never fetches remote images.
-  # It accepts at most this many locally embedded JPEG, PNG, or GIF images;
-  # each image must be within both the decoded-byte and pixel limits.
+  # Limits the number, file size, and dimensions of embedded images sent for
+  # analysis. Remote images are never downloaded.
   max_images: 2
   max_image_bytes: 2097152
   max_image_pixels: 12000000
@@ -81,34 +81,42 @@ ai:
   app_name: SentinelMilter
 
 policy:
-  # Confidence threshold from 0 through 1, inclusive. Used only when the AI
-  # classification is spam or scam; legitimate and uncertain are accepted.
+  # Reject spam or scam classifications at or above this confidence score (0–1).
   reject_score: 0.9
 
-  # Action on endpoint timeouts, connection failures, HTTP errors, or invalid
-  # AI responses: accept or tempfail. tempfail applies only in enforce mode;
-  # monitor mode always accepts.
+  # Scan email sent by authenticated users. Disable to bypass AI analysis of
+  # outbound mail.
+  scan_authenticated: true
+
+  # Action when AI analysis fails: accept or tempfail. tempfail asks the sending
+  # mail server to retry later. Monitor mode always accepts.
   ai_error_action: accept
 
   # Text returned with SMTP status 550 5.7.1 when a message is rejected.
   # Keep this on one line; NUL and newline characters are removed.
   reject_message: Message rejected as suspected spam or fraud
 
-  # After an AI-classified message is rejected in enforce mode, add the sending
-  # IP address to a temporary blacklist for the configured time. Further
-  # transactions from that IP are rejected at MAIL FROM without another AI
-  # request. Uses Go duration syntax; 0s disables this feature. The blacklist
-  # is held in memory and cleared when SentinelMilter restarts.
+  # Temporarily blacklist the sending IP after rejecting an email, avoiding further
+  # AI requests. Uses Go duration syntax; 0s disables.
   rejected_ip_block_duration: 60m
 
-  # Boolean: when true, each rejected delivery attempt from a blacklisted IP
-  # restarts its configured blacklist time. The safer default is false because
-  # repeated traffic could otherwise keep a shared sending IP blocked indefinitely.
-  rejected_ip_refresh_on_attempt: false
+  # Rejections within the rolling window required for longer IP blacklisting.
+  # Set to 0 to disable escalation.
+  rejected_ip_repeat_threshold: 3
+  rejected_ip_repeat_window: 720h
+  rejected_ip_repeat_block_duration: 720h
 
-  # Maximum cached sending IPs; positive integer. When full, the entry expiring
-  # soonest is removed before a new IP is added.
+  # Extend the repeat-offender blacklisting timeout after each delivery attempt.
+  rejected_ip_repeat_refresh_on_attempt: true
+
+  # Legitimate emails required to remove one IP strike. Set to 0 to disable.
+  rejected_ip_legitimate_messages_per_strike: 3
+
+  # Maximum stored sending IP records; positive integer.
   rejected_ip_cache_size: 10000
+
+  # Persistent reputation state. Strikes and active blocks survive restarts.
+  rejected_ip_state_file: /var/lib/sentinelmilter/rejected-ip-state.json
 
   # Exact IP addresses or CIDR ranges that must never be added to the rejection
   # cache. Add trusted relays and shared forwarding services here as needed.
@@ -116,11 +124,8 @@ policy:
     - 127.0.0.0/8
     - ::1/128
 
-  # Reverse-DNS domains whose sending IPs must never be blacklisted. An entry
-  # matches the domain itself and all subdomains: outlook.com therefore matches
-  # outbound.protection.outlook.com. SentinelMilter also resolves the hostname
-  # forward and requires it to contain the connecting IP, preventing a forged
-  # PTR record from bypassing the blacklist.
+  # Never blacklist IPs with forward-confirmed reverse DNS matching these domains
+  # or their subdomains.
   rejected_ip_domain_allowlist:
     - google.com
     - outlook.com
@@ -135,14 +140,70 @@ policy:
     - gmx.net
     - web.de
 
-  # Maximum time allowed for the reverse and forward DNS checks. This lookup is
-  # performed only after an AI-classified message has already been rejected.
-  rejected_ip_dns_timeout: 5s
+correspondent_allowlist:
+  # Add recipients of accepted email sent by authenticated users to the
+  # correspondent allowlist.
+  learn_authenticated_recipients: true
+
+  # Automatically add consistently legitimate inbound senders to the allowlist.
+  learn_legitimate_senders: true
+
+  # Number of legitimate emails required to allowlist an inbound sender, and the
+  # minimum confidence score each email must meet.
+  legitimate_sender_min_messages: 5
+  legitimate_sender_min_score: 0.99
+
+  # Boolean: require trusted aligned DKIM before an inbound legitimate result
+  # contributes toward automatic whitelisting.
+  legitimate_sender_require_dkim: true
+
+  # Boolean: use saved relationships when assessing inbound mail. When false,
+  # the database may still be populated for inspection without affecting mail.
+  use_allowlist: true
+
+  # per_sender keeps each local user's correspondents separate. global uses
+  # known correspondents from all local users.
+  scope: per_sender
+
+  # For per_sender scope, require all envelope recipients to recognise the
+  # correspondent, or any to require only one. all is safer for shared servers.
+  recipient_match: all
+
+  # Boolean: bypass AI email scanning when recipient_match and any configured
+  # authentication requirements are satisfied. When false, the relationship
+  # is supplied to the AI as supporting evidence.
+  bypass_ai: true
+
+  # Require trusted, aligned DKIM authentication before a known correspondent can
+  # bypass AI. Disable to permit bypass without authentication.
+  require_dkim_for_bypass: true
+
+  # Runtime-generated state file and maximum number of retained relationships.
+  file: /var/lib/sentinelmilter/correspondent-allowlist.json
+  max_entries: 10000
+
+  # Remove relationships with no qualifying inbound or outbound activity for
+  # this duration. 0s disables age-based expiry.
+  stale_after: 8760h
+
+  # Minimum interval between saving activity updates for each relationship.
+  # Set to 0s to save every qualifying activity.
+  activity_update_interval: 24h
+
+  # Identifies Authentication-Results headers added by your own mail server, allowing
+  # SentinelMilter to trust their DKIM results. $mta_hostname automatically uses
+  # your MTA hostname. Your MTA must remove forged inbound Authentication-Results
+  # headers claiming this hostname.
+  trusted_authserv_ids:
+    - "$mta_hostname"
 
 logging:
   # Minimum log level: debug, info, warn, or error.
   level: info
 
-  # Boolean: include or omit the Subject header in successful decision logs.
-  # Message bodies are never logged.
+  # Include email subjects in successful decision logs.
   include_subject: true
+
+  # Log complete AI input for troubleshooting. This may expose sensitive email
+  # content, so enable it only temporarily. Image data is never logged.
+  include_ai_input: false

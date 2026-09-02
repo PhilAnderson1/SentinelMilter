@@ -9,10 +9,12 @@ SentinelMilter is an AI-powered mail filter for identifying and rejecting unwant
 - Uses semantic analysis to detect unwanted email by meaning, not just keywords or signatures.
 - Performs forensic AI analysis of message headers, body content, and hyperlink destinations.
 - Reads text embedded in images to detect scams that evade conventional text-based filters.
-- Scans inbound and outbound email, helping protect your server's sending reputation.
+- Smart correspondent allowlisting learns trusted relationships and recurring legitimate senders, reducing false positives and unnecessary AI scans.
+- Automatically builds persistent IP reputation to block repeat offenders without repeated AI analysis.
+- Can scan inbound and outbound email, helping protect your server's sending reputation.
 - Installs easily as a single, statically linked binary with no runtime dependencies.
 - Provides a safe monitor mode that logs classifications and proposed actions without blocking email.
-- Cost-effective to operate at approximately $0.35 per 1,000 emails with the suggested LLM, depending on message length and provider pricing.
+- Cost-effective to operate at approximately $0.35 per 1,000 scanned emails with the suggested LLM, depending on message length and provider pricing.
 - Avoids provider lock-in by supporting compatible hosted AI services and locally hosted AI models.
 
 SentinelMilter works with OpenRouter and llama.cpp-style `v1/chat/completions` AI endpoints.
@@ -53,7 +55,9 @@ milter_default_action = accept
 milter_protocol = 6
 ```
 
-SentinelMilter also supports Unix sockets, for example `unix:/run/sentinelmilter/sentinelmilter.sock`. The Postfix process must be able to access the socket and its parent directory; on installations where Postfix SMTP runs chrooted, expose the socket inside its chroot. Keep TCP listeners bound to a loopback address unless access is restricted separately.
+SentinelMilter uses DKIM, SPF and DMARC results supplied by earlier mail filters as evidence. List authentication Milters before SentinelMilter in your Postfix configuration to improve classification accuracy.
+
+Keep TCP listeners bound to a loopback address unless access is restricted separately.
 
 Validate the configuration before enabling the service:
 
@@ -79,6 +83,18 @@ Once monitor-mode results are satisfactory, change `mode: monitor` to `mode: enf
 ```sh
 sudo systemctl restart sentinelmilter
 ```
+
+To add or remove correspondent whitelist entries manually, stop SentinelMilter while editing its database:
+
+```sh
+sudo systemctl stop sentinelmilter
+sudo sentinelmilter --whitelist-add sender@example.com recipient@example.net
+sudo sentinelmilter --whitelist-del sender@example.com recipient@example.net
+sudo sentinelmilter --whitelist-del sender@example.com '*'
+sudo systemctl start sentinelmilter
+```
+
+The wildcard deletes that sender's entries for every local recipient.
 
 ## Build from source
 

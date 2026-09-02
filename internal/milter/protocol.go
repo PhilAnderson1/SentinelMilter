@@ -37,9 +37,18 @@ const (
 	optionPayloadBytes       = 12
 	maxFrameBytes            = 16 << 20
 	maxSMTPReplyBytes        = 510 // Excludes the terminating CRLF.
+	maxMacroPairs            = 128
+	maxAuthenticationBytes   = 1024
 )
 
 type action uint8
+
+type sessionMacroValues struct {
+	AuthenticationIdentity string
+	MTAHostname            string
+	AuthenticationFound    bool
+	MTAHostnameFound       bool
+}
 
 const (
 	actionAccept action = iota
@@ -101,6 +110,78 @@ func parseHeader(payload []byte) (string, string, bool) {
 		return "", "", false
 	}
 	return string(name), string(value), true
+}
+
+func parseEnvelopeAddress(payload []byte) (string, bool) {
+	address, _, found := bytes.Cut(payload, []byte{0})
+	if !found || len(address) == 0 {
+		return "", false
+	}
+	return string(address), true
+}
+
+func parseConnectHostname(payload []byte) (string, bool) {
+	hostname, _, found := bytes.Cut(payload, []byte{0})
+	if !found {
+		return "", false
+	}
+	return string(hostname), true
+}
+
+func parseSMTPIdentity(payload []byte) (string, bool) {
+	if len(payload) == 0 || payload[len(payload)-1] != 0 || bytes.IndexByte(payload[:len(payload)-1], 0) >= 0 {
+		return "", false
+	}
+	return string(payload[:len(payload)-1]), true
+}
+
+func parseAuthenticationMacro(payload []byte) (target byte, identity string, found, valid bool) {
+	target, values, valid := parseSessionMacros(payload)
+	return target, values.AuthenticationIdentity, values.AuthenticationFound, valid
+}
+
+func parseSessionMacros(payload []byte) (target byte, values sessionMacroValues, valid bool) {
+	if len(payload) == 0 {
+		return 0, values, false
+	}
+	target = payload[0]
+	remainder := payload[1:]
+	if len(remainder) == 0 {
+		return target, values, true
+	}
+	if remainder[len(remainder)-1] != 0 {
+		return target, values, false
+	}
+	for pairs := 0; len(remainder) > 0; pairs++ {
+		if pairs >= maxMacroPairs {
+			return target, values, false
+		}
+		name, rest, ok := bytes.Cut(remainder, []byte{0})
+		if !ok || len(name) == 0 {
+			return target, values, false
+		}
+		value, rest, ok := bytes.Cut(rest, []byte{0})
+		if !ok {
+			return target, values, false
+		}
+		remainder = rest
+		macroName := strings.Trim(string(name), "{}")
+		switch {
+		case strings.EqualFold(macroName, "auth_authen"):
+			if values.AuthenticationFound || len(value) > maxAuthenticationBytes {
+				return target, values, false
+			}
+			values.AuthenticationIdentity = string(value)
+			values.AuthenticationFound = true
+		case strings.EqualFold(macroName, "j"):
+			if values.MTAHostnameFound || len(value) > 253 {
+				return target, values, false
+			}
+			values.MTAHostname = string(value)
+			values.MTAHostnameFound = true
+		}
+	}
+	return target, values, true
 }
 
 func parseConnectIP(payload []byte) (netip.Addr, bool) {

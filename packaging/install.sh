@@ -44,6 +44,7 @@ fi
 
 install -m 0755 "$binary" /usr/local/sbin/sentinelmilter
 install -d -o root -g sentinelmilter -m 0750 /etc/sentinelmilter
+install -d -o sentinelmilter -g sentinelmilter -m 0750 /var/lib/sentinelmilter
 
 install_config_if_missing() {
     source_file=$1

@@ -1,0 +1,354 @@
+package milter
+
+import (
+	"log/slog"
+	"net/netip"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/PhilAnderson1/SentinelMilter/internal/config"
+	"github.com/PhilAnderson1/SentinelMilter/internal/message"
+)
+
+const (
+	rejectedIPFileVersion            = 1
+	maxRejectedIPFileSize            = 8 << 20
+	rejectedIPRefreshPersistInterval = 5 * time.Minute
+	rejectedIPBlockShort             = "short"
+	rejectedIPBlockRepeat            = "repeat"
+)
+
+type ipBlock struct {
+	expires        time.Time
+	classification string
+	score          float64
+	level          string
+	strikeCount    int
+}
+
+type rejectedIPRecord struct {
+	IP                 string      `json:"ip"`
+	Strikes            []time.Time `json:"strikes,omitempty"`
+	BlockLevel         string      `json:"block_level,omitempty"`
+	BlockedUntil       time.Time   `json:"blocked_until,omitempty"`
+	Classification     string      `json:"classification,omitempty"`
+	Score              float64     `json:"score,omitempty"`
+	LegitimateCount    int         `json:"legitimate_count,omitempty"`
+	LastActivityAt     time.Time   `json:"last_activity_at"`
+	PersistedRefreshAt time.Time   `json:"-"`
+}
+
+type rejectedIPFile struct {
+	Version int                `json:"version"`
+	Entries []rejectedIPRecord `json:"entries"`
+}
+
+type ipReputationStore struct {
+	mu                     sync.Mutex
+	entries                map[netip.Addr]rejectedIPRecord
+	shortDuration          time.Duration
+	repeatThreshold        int
+	repeatWindow           time.Duration
+	repeatDuration         time.Duration
+	repeatRefreshOnAttempt bool
+	legitimatePerStrike    int
+	maxSize                int
+	stateFile              string
+	allowlist              []netip.Prefix
+	domainAllowlist        []string
+	now                    func() time.Time
+	log                    *slog.Logger
+}
+
+func newIPReputationStore(policy config.PolicyConfig, log *slog.Logger) *ipReputationStore {
+	cache := &ipReputationStore{
+		entries: make(map[netip.Addr]rejectedIPRecord), shortDuration: policy.RejectedIPBlockDuration.Value(),
+		repeatThreshold: policy.RejectedIPRepeatThreshold, repeatWindow: policy.RejectedIPRepeatWindow.Value(),
+		repeatDuration: policy.RejectedIPRepeatBlockDuration.Value(), repeatRefreshOnAttempt: policy.RejectedIPRepeatRefreshOnAttempt,
+		legitimatePerStrike: policy.RejectedIPLegitimatePerStrike,
+		maxSize:             policy.RejectedIPCacheSize, stateFile: policy.RejectedIPStateFile, now: time.Now, log: log,
+	}
+	for _, entry := range policy.RejectedIPAllowlist {
+		if prefix, err := netip.ParsePrefix(entry); err == nil {
+			cache.allowlist = append(cache.allowlist, prefix)
+			continue
+		}
+		if addr, err := netip.ParseAddr(entry); err == nil {
+			bits := 128
+			if addr.Is4() || addr.Is4In6() {
+				bits = 32
+			}
+			cache.allowlist = append(cache.allowlist, netip.PrefixFrom(addr.Unmap(), bits))
+		}
+	}
+	for _, domain := range policy.RejectedIPDomainAllowlist {
+		cache.domainAllowlist = append(cache.domainAllowlist, normalizeDomain(domain))
+	}
+	if cache.enabled() && cache.stateFile != "" {
+		if err := cache.load(); err != nil && !os.IsNotExist(err) && log != nil {
+			log.Error("cannot load rejected IP state; continuing with empty state", "file", cache.stateFile, "error", err)
+		}
+	}
+	return cache
+}
+
+func (c *ipReputationStore) enabled() bool {
+	return c != nil && c.maxSize > 0 && (c.shortDuration > 0 || c.repeatThreshold > 0)
+}
+
+func (c *ipReputationStore) allowed(addr netip.Addr) (netip.Prefix, bool) {
+	if !addr.IsValid() {
+		return netip.Prefix{}, true
+	}
+	addr = addr.Unmap()
+	for _, prefix := range c.allowlist {
+		if prefix.Contains(addr) {
+			return prefix, true
+		}
+	}
+	return netip.Prefix{}, false
+}
+
+func (c *ipReputationStore) add(addr netip.Addr, classification string, score float64, dns connectionDNSResult) bool {
+	if !c.enabled() || !addr.IsValid() {
+		return false
+	}
+	addr = addr.Unmap()
+	if prefix, ok := c.allowed(addr); ok {
+		c.debug("sending IP excluded from rejection reputation", "remote_ip", addr.String(), "matched_prefix", prefix.String(), "reason", "ip_allowlist", "cache_size", c.size())
+		return false
+	}
+	if hostname, domain, ok := c.domainAllowed(dns); ok {
+		c.debug("sending IP excluded from rejection reputation", "remote_ip", addr.String(), "reverse_dns", hostname, "matched_domain", domain, "reason", "domain_allowlist", "cache_size", c.size())
+		return false
+	}
+	now := c.now().UTC()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cleanupLocked(now)
+	record, existed := c.entries[addr]
+	if !existed && len(c.entries) >= c.maxSize {
+		c.evictOldestLocked()
+	}
+	record.IP = addr.String()
+	record.Strikes = c.pruneStrikes(record.Strikes, now)
+	if c.repeatThreshold > 0 {
+		record.Strikes = append(record.Strikes, now)
+		if len(record.Strikes) > c.repeatThreshold {
+			record.Strikes = record.Strikes[len(record.Strikes)-c.repeatThreshold:]
+		}
+	}
+	record.Classification, record.Score, record.LastActivityAt = classification, score, now
+	record.LegitimateCount = 0
+	if c.repeatThreshold > 0 && len(record.Strikes) >= c.repeatThreshold {
+		record.BlockLevel, record.BlockedUntil = rejectedIPBlockRepeat, now.Add(c.repeatDuration)
+	} else if c.shortDuration > 0 {
+		record.BlockLevel, record.BlockedUntil = rejectedIPBlockShort, now.Add(c.shortDuration)
+	}
+	record.PersistedRefreshAt = now
+	c.entries[addr] = record
+	c.saveOrLogLocked()
+	c.debug("sending IP reputation updated", "remote_ip", addr.String(), "classification", classification, "score", score, "block_level", record.BlockLevel, "strike_count", len(record.Strikes), "block_expires_at", record.BlockedUntil, "cache_size", len(c.entries))
+	return record.BlockLevel != ""
+}
+
+// recordLegitimate applies positive AI evidence only to an existing reputation
+// record. It never creates a record or ends an active block early.
+func (c *ipReputationStore) recordLegitimate(addr netip.Addr) {
+	if !c.enabled() || c.legitimatePerStrike <= 0 || !addr.IsValid() {
+		return
+	}
+	addr = addr.Unmap()
+	now := c.now().UTC()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	record, ok := c.entries[addr]
+	if !ok {
+		return
+	}
+	record.Strikes = c.pruneStrikes(record.Strikes, now)
+	if len(record.Strikes) == 0 {
+		record.LegitimateCount = 0
+		if record.BlockLevel == "" || !record.BlockedUntil.After(now) {
+			delete(c.entries, addr)
+			c.debug("sending IP removed from rejection reputation", "remote_ip", addr.String(), "reason", "no_strikes", "cache_size", len(c.entries))
+			c.saveOrLogLocked()
+			return
+		}
+		c.entries[addr] = record
+		return
+	}
+	record.LegitimateCount++
+	record.LastActivityAt = now
+	strikeRemoved := false
+	if record.LegitimateCount >= c.legitimatePerStrike {
+		record.Strikes = record.Strikes[1:]
+		record.LegitimateCount = 0
+		strikeRemoved = true
+	}
+	if len(record.Strikes) == 0 && record.BlockLevel == "" {
+		delete(c.entries, addr)
+	} else {
+		c.entries[addr] = record
+	}
+	c.saveOrLogLocked()
+	c.debug("sending IP legitimate evidence recorded", "remote_ip", addr.String(), "legitimate_count", record.LegitimateCount, "strike_removed", strikeRemoved, "strike_count", len(record.Strikes), "block_level", record.BlockLevel, "cache_size", len(c.entries))
+}
+
+func (c *ipReputationStore) lookup(addr netip.Addr) (ipBlock, bool) {
+	if !c.enabled() || !addr.IsValid() {
+		return ipBlock{}, false
+	}
+	if _, allowed := c.allowed(addr); allowed {
+		return ipBlock{}, false
+	}
+	addr = addr.Unmap()
+	now := c.now().UTC()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	record, ok := c.entries[addr]
+	if !ok {
+		return ipBlock{}, false
+	}
+	record.Strikes = c.pruneStrikes(record.Strikes, now)
+	if record.BlockLevel != "" && !record.BlockedUntil.After(now) {
+		if record.BlockLevel == rejectedIPBlockRepeat {
+			delete(c.entries, addr)
+			c.debug("sending IP removed from rejection reputation", "remote_ip", addr.String(), "reason", "repeat_block_expired", "cache_size", len(c.entries))
+			c.saveOrLogLocked()
+			return ipBlock{}, false
+		}
+		record.BlockLevel, record.BlockedUntil = "", time.Time{}
+		if len(record.Strikes) == 0 {
+			delete(c.entries, addr)
+		} else {
+			c.entries[addr] = record
+		}
+		c.debug("sending IP short block expired", "remote_ip", addr.String(), "strike_count", len(record.Strikes), "cache_size", len(c.entries))
+		c.saveOrLogLocked()
+		return ipBlock{}, false
+	}
+	if record.BlockLevel == "" {
+		if len(record.Strikes) == 0 {
+			delete(c.entries, addr)
+			c.saveOrLogLocked()
+		} else {
+			c.entries[addr] = record
+		}
+		return ipBlock{}, false
+	}
+	if record.BlockLevel == rejectedIPBlockRepeat && c.repeatRefreshOnAttempt {
+		record.BlockedUntil, record.LastActivityAt = now.Add(c.repeatDuration), now
+		persist := now.Sub(record.PersistedRefreshAt) >= rejectedIPRefreshPersistInterval
+		if persist {
+			record.PersistedRefreshAt = now
+		}
+		c.entries[addr] = record
+		c.debug("sending IP repeat block expiry refreshed", "remote_ip", addr.String(), "block_level", record.BlockLevel, "strike_count", len(record.Strikes), "block_expires_at", record.BlockedUntil, "cache_size", len(c.entries))
+		if persist {
+			c.saveOrLogLocked()
+		}
+	} else {
+		c.entries[addr] = record
+	}
+	return ipBlock{expires: record.BlockedUntil, classification: record.Classification, score: record.Score, level: record.BlockLevel, strikeCount: len(record.Strikes)}, true
+}
+
+func (c *ipReputationStore) pruneStrikes(strikes []time.Time, now time.Time) []time.Time {
+	if c.repeatThreshold == 0 || c.repeatWindow <= 0 {
+		return nil
+	}
+	cutoff := now.Add(-c.repeatWindow)
+	kept := strikes[:0]
+	for _, strike := range strikes {
+		if strike.After(cutoff) {
+			kept = append(kept, strike)
+		}
+	}
+	return kept
+}
+
+func (c *ipReputationStore) cleanupLocked(now time.Time) {
+	changed := false
+	for addr, record := range c.entries {
+		record.Strikes = c.pruneStrikes(record.Strikes, now)
+		if record.BlockLevel == rejectedIPBlockRepeat && !record.BlockedUntil.After(now) {
+			delete(c.entries, addr)
+			changed = true
+			continue
+		}
+		if record.BlockLevel == rejectedIPBlockShort && !record.BlockedUntil.After(now) {
+			record.BlockLevel, record.BlockedUntil, changed = "", time.Time{}, true
+		}
+		if record.BlockLevel == "" && len(record.Strikes) == 0 {
+			delete(c.entries, addr)
+			changed = true
+		} else {
+			c.entries[addr] = record
+		}
+	}
+	if changed {
+		c.saveOrLogLocked()
+	}
+}
+
+func (c *ipReputationStore) evictOldestLocked() {
+	var victim netip.Addr
+	var oldest time.Time
+	victimRank := 3
+	for addr, record := range c.entries {
+		rank := 0
+		if record.BlockLevel == rejectedIPBlockShort {
+			rank = 1
+		} else if record.BlockLevel == rejectedIPBlockRepeat {
+			rank = 2
+		}
+		if !victim.IsValid() || rank < victimRank || (rank == victimRank && record.LastActivityAt.Before(oldest)) {
+			victim, oldest = addr, record.LastActivityAt
+			victimRank = rank
+		}
+	}
+	if victim.IsValid() {
+		delete(c.entries, victim)
+		c.debug("sending IP removed from rejection reputation", "remote_ip", victim.String(), "reason", "capacity", "cache_size", len(c.entries))
+	}
+}
+
+func (c *ipReputationStore) domainAllowed(dns connectionDNSResult) (string, string, bool) {
+	if len(c.domainAllowlist) == 0 || dns.status != message.ReverseDNSAvailable {
+		return "", "", false
+	}
+	for _, entry := range dns.names {
+		if entry.Confirmation != message.ForwardConfirmed {
+			continue
+		}
+		hostname := normalizeDomain(entry.Hostname)
+		for _, domain := range c.domainAllowlist {
+			if domainMatches(hostname, domain) {
+				return hostname, domain, true
+			}
+		}
+	}
+	return "", "", false
+}
+
+func normalizeDomain(value string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+}
+func domainMatches(hostname, domain string) bool {
+	return hostname == domain || strings.HasSuffix(hostname, "."+domain)
+}
+
+func (c *ipReputationStore) debug(msg string, attrs ...any) {
+	if c.log != nil {
+		c.log.Debug(msg, attrs...)
+	}
+}
+
+func (c *ipReputationStore) size() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries)
+}
