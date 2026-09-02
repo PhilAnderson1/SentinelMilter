@@ -114,6 +114,7 @@ sudo install -m 0755 sentinelmilter /usr/local/sbin/sentinelmilter
 getent group sentinelmilter >/dev/null || sudo groupadd --system sentinelmilter
 id sentinelmilter >/dev/null 2>&1 || sudo useradd --system --gid sentinelmilter --home-dir /nonexistent --shell /usr/sbin/nologin sentinelmilter
 sudo install -d -o root -g sentinelmilter -m 0750 /etc/sentinelmilter
+sudo install -d -o sentinelmilter -g sentinelmilter -m 0750 /var/lib/sentinelmilter
 sudo install -o root -g sentinelmilter -m 0640 configs/sentinelmilter.yaml /etc/sentinelmilter/
 sudo install -o root -g sentinelmilter -m 0640 configs/detection-prompt.txt /etc/sentinelmilter/
 sudo install -m 0644 packaging/systemd/sentinelmilter.service /etc/systemd/system/
