@@ -1,0 +1,99 @@
+package milter
+
+import (
+	"context"
+	"errors"
+	"strings"
+
+	"github.com/PhilAnderson1/SentinelMilter/internal/attachment"
+)
+
+func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {
+	if ss.server.attachments == nil {
+		return false, true
+	}
+	finding, scanErr := ss.server.attachments.Scan(
+		ss.message.Header("Content-Type"),
+		ss.message.Header("Content-Transfer-Encoding"),
+		ss.message.Header("Content-Disposition"),
+		[]byte(ss.message.Body.String()),
+	)
+	if finding != nil {
+		return true, ss.finishAttachmentDecision(ctx, actionReject, finding.Path, finding.Detection, nil)
+	}
+	if scanErr == nil && ss.message.BodyTruncated {
+		scanErr = errors.New("message body was truncated before attachment inspection completed")
+	}
+	if scanErr == nil {
+		return false, true
+	}
+	actionName := ss.server.cfg.Attachments.UnscannableAction
+	var typedError *attachment.ScanError
+	if errors.As(scanErr, &typedError) && typedError.Encrypted {
+		actionName = ss.server.cfg.Attachments.EncryptedArchiveAction
+	}
+	proposed := attachmentConfiguredAction(actionName)
+	if proposed == actionAccept {
+		ss.server.log.WarnContext(ctx, "attachment inspection incomplete; continuing with AI analysis",
+			"message_id", ss.message.Header("Message-ID"), "error", scanErr)
+		return false, true
+	}
+	return true, ss.finishAttachmentDecision(ctx, proposed, attachmentErrorPath(scanErr), "attachment inspection incomplete", scanErr)
+}
+
+func (ss *session) finishAttachmentDecision(ctx context.Context, proposed action, path, detection string, scanErr error) bool {
+	selected := proposed
+	if ss.server.cfg.Mode == "monitor" {
+		selected = actionAccept
+	}
+	response := []byte{responseAccept}
+	switch selected {
+	case actionReject:
+		response = replyCode("550", "5.7.1", ss.server.cfg.Attachments.RejectMessage)
+	case actionTempfail:
+		response = []byte{responseTempfail}
+	}
+	err := writeFrame(ss.conn, response)
+	attrs := []any{
+		"message_id", ss.message.Header("Message-ID"),
+		"mode", ss.server.cfg.Mode,
+		"attachment_path", path,
+		"detection", detection,
+		"proposed_action", proposed.String(),
+		"actual_action", selected.String(),
+		"response_sent", err == nil,
+	}
+	if scanErr != nil {
+		attrs = append(attrs, "inspection_error", scanErr)
+	}
+	if ss.server.cfg.Logging.IncludeSubject {
+		attrs = append(attrs, "subject", ss.message.Header("Subject"))
+	}
+	if err != nil {
+		attrs = append(attrs, "response_error", err)
+		ss.server.log.ErrorContext(ctx, "attachment policy response failed", attrs...)
+		return false
+	}
+	ss.server.log.InfoContext(ctx, "attachment policy decision", attrs...)
+	ss.resetMessage(phaseConnection)
+	return true
+}
+
+func attachmentConfiguredAction(value string) action {
+	switch value {
+	case "reject":
+		return actionReject
+	case "tempfail":
+		return actionTempfail
+	default:
+		return actionAccept
+	}
+}
+
+func attachmentErrorPath(err error) string {
+	var scanErr *attachment.ScanError
+	if errors.As(err, &scanErr) && strings.TrimSpace(scanErr.Path) != "" {
+		return scanErr.Path
+	}
+	return "message"
+}

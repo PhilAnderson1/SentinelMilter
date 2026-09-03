@@ -9,6 +9,7 @@ SentinelMilter is an AI-powered mail filter for identifying and rejecting unwant
 - Uses semantic analysis to detect unwanted email by meaning, not just keywords or signatures.
 - Performs forensic AI analysis of message headers, body content, and hyperlink destinations.
 - Reads text embedded in images to detect scams that evade conventional text-based filters.
+- Blocks executable attachments, including files disguised or concealed inside compressed archives.
 - Smart correspondent allowlisting learns trusted relationships and recurring legitimate senders, reducing false positives and unnecessary AI scans.
 - Automatically builds persistent IP reputation to block repeat offenders without repeated AI analysis.
 - Can scan inbound and outbound email, helping protect your server's sending reputation.
@@ -42,7 +43,7 @@ The release binaries are statically linked. The installer places the executable 
 
 ### Configuration
 
-Edit `/etc/sentinelmilter/sentinelmilter.yaml` before starting the service. To use a hosted model, create an account and API key at [OpenRouter](https://openrouter.ai/), then add the key and desired model to the `ai` section. Alternatively, change the endpoint and model to use a locally operated llama.cpp `v1/chat/completions` server. An API key can be stored in `ai.api_key` or supplied through the environment variable named by `ai.api_key_env`.
+Edit `/etc/sentinelmilter/sentinelmilter.yaml` before starting the service. To use a hosted AI model, get an API key from [OpenRouter](https://openrouter.ai/), then add the key to the `ai` section - if the example model is no longer available, select a current compatible model and adjust the prompt or settings if necessary. Alternatively, change the endpoint and model to use a locally operated llama.cpp `v1/chat/completions` server. An API key can be stored in `ai.api_key` or supplied through the environment variable named by `ai.api_key_env`.
 
 Leave SentinelMilter in `monitor` mode initially so that it records classifications and proposed actions without rejecting messages.
 

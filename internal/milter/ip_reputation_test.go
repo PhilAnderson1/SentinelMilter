@@ -14,9 +14,9 @@ import (
 
 func TestRejectedIPCacheExpiresEntries(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration: config.Duration(10 * time.Minute),
-		RejectedIPCacheSize:     10,
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration: config.Duration(10 * time.Minute),
+		MaxEntries:    10,
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.10")
@@ -35,10 +35,10 @@ func TestRejectedIPCacheExpiresEntries(t *testing.T) {
 func TestRejectedIPCacheHonorsAllowlist(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration: config.Duration(time.Hour),
-		RejectedIPCacheSize:     10,
-		RejectedIPAllowlist:     []string{"192.0.2.0/24", "2001:db8::1"},
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration: config.Duration(time.Hour),
+		MaxEntries:    10,
+		IPAllowlist:   []string{"192.0.2.0/24", "2001:db8::1"},
 	}, logger)
 	for _, value := range []string{"192.0.2.25", "2001:db8::1"} {
 		if cache.add(netip.MustParseAddr(value), "spam", 1, connectionDNSResult{}) {
@@ -61,9 +61,9 @@ func TestRejectedIPCacheHonorsAllowlist(t *testing.T) {
 
 func TestRejectedIPCacheEvictsEarliestExpiry(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration: config.Duration(10 * time.Minute),
-		RejectedIPCacheSize:     2,
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration: config.Duration(10 * time.Minute),
+		MaxEntries:    2,
 	}, nil)
 	cache.now = func() time.Time { return now }
 	first := netip.MustParseAddr("192.0.2.1")
@@ -86,9 +86,9 @@ func TestRejectedIPCacheEvictsEarliestExpiry(t *testing.T) {
 
 func TestRejectedIPCacheShortBlockDoesNotRefreshOnAttempt(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration: config.Duration(time.Minute),
-		RejectedIPCacheSize:     10,
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration: config.Duration(time.Minute),
+		MaxEntries:    10,
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.10")
@@ -114,9 +114,9 @@ func TestRejectedIPCacheLogsSizeOnAddAndRemove(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration: config.Duration(time.Minute),
-		RejectedIPCacheSize:     1,
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration: config.Duration(time.Minute),
+		MaxEntries:    1,
 	}, logger)
 	cache.now = func() time.Time { return now }
 	first := netip.MustParseAddr("192.0.2.1")
@@ -141,10 +141,10 @@ func TestRejectedIPCacheLogsSizeOnAddAndRemove(t *testing.T) {
 
 func TestRejectedIPCacheHonorsForwardConfirmedDomainAllowlist(t *testing.T) {
 	addr := netip.MustParseAddr("192.0.2.25")
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration:   config.Duration(time.Hour),
-		RejectedIPCacheSize:       10,
-		RejectedIPDomainAllowlist: []string{"outlook.com"},
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration:   config.Duration(time.Hour),
+		MaxEntries:      10,
+		DomainAllowlist: []string{"outlook.com"},
 	}, nil)
 	dns := connectionDNSResult{
 		status: message.ReverseDNSAvailable,
@@ -158,7 +158,7 @@ func TestRejectedIPCacheHonorsForwardConfirmedDomainAllowlist(t *testing.T) {
 	}
 }
 
-func TestRejectedIPDomainAllowlistRequiresLabelBoundaryAndForwardConfirmation(t *testing.T) {
+func TestDomainAllowlistRequiresLabelBoundaryAndForwardConfirmation(t *testing.T) {
 	tests := []struct {
 		name         string
 		hostname     string
@@ -170,10 +170,10 @@ func TestRejectedIPDomainAllowlistRequiresLabelBoundaryAndForwardConfirmation(t 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			addr := netip.MustParseAddr("192.0.2.25")
-			cache := newIPReputationStore(config.PolicyConfig{
-				RejectedIPBlockDuration:   config.Duration(time.Hour),
-				RejectedIPCacheSize:       10,
-				RejectedIPDomainAllowlist: []string{"outlook.com"},
+			cache := newIPReputationStore(config.IPReputationConfig{
+				BlockDuration:   config.Duration(time.Hour),
+				MaxEntries:      10,
+				DomainAllowlist: []string{"outlook.com"},
 			}, nil)
 			dns := connectionDNSResult{
 				status: message.ReverseDNSAvailable,
@@ -186,11 +186,11 @@ func TestRejectedIPDomainAllowlistRequiresLabelBoundaryAndForwardConfirmation(t 
 	}
 }
 
-func TestRejectedIPDomainAllowlistFailsOpenOnUnavailableDNSResult(t *testing.T) {
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration:   config.Duration(time.Hour),
-		RejectedIPCacheSize:       10,
-		RejectedIPDomainAllowlist: []string{"outlook.com"},
+func TestDomainAllowlistFailsOpenOnUnavailableDNSResult(t *testing.T) {
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration:   config.Duration(time.Hour),
+		MaxEntries:      10,
+		DomainAllowlist: []string{"outlook.com"},
 	}, nil)
 	if !cache.add(netip.MustParseAddr("192.0.2.25"), "scam", 1, connectionDNSResult{status: message.ReverseDNSLookupFailed}) {
 		t.Fatal("unavailable DNS evidence prevented blacklisting")
@@ -199,13 +199,13 @@ func TestRejectedIPDomainAllowlistFailsOpenOnUnavailableDNSResult(t *testing.T) 
 
 func TestRejectedIPCachePromotesRepeatedAIRejections(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration:       config.Duration(time.Minute),
-		RejectedIPRepeatThreshold:     3,
-		RejectedIPRepeatWindow:        config.Duration(time.Hour),
-		RejectedIPRepeatBlockDuration: config.Duration(24 * time.Hour),
-		RejectedIPCacheSize:           10,
-		RejectedIPStateFile:           t.TempDir() + "/state.json",
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration:       config.Duration(time.Minute),
+		RepeatThreshold:     3,
+		RepeatWindow:        config.Duration(time.Hour),
+		RepeatBlockDuration: config.Duration(24 * time.Hour),
+		MaxEntries:          10,
+		StateFile:           t.TempDir() + "/state.json",
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.40")
@@ -228,13 +228,13 @@ func TestRejectedIPCachePromotesRepeatedAIRejections(t *testing.T) {
 
 func TestRejectedIPCachePrunesStrikesOutsideWindow(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration:       config.Duration(time.Minute),
-		RejectedIPRepeatThreshold:     2,
-		RejectedIPRepeatWindow:        config.Duration(10 * time.Minute),
-		RejectedIPRepeatBlockDuration: config.Duration(time.Hour),
-		RejectedIPCacheSize:           10,
-		RejectedIPStateFile:           t.TempDir() + "/state.json",
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration:       config.Duration(time.Minute),
+		RepeatThreshold:     2,
+		RepeatWindow:        config.Duration(10 * time.Minute),
+		RepeatBlockDuration: config.Duration(time.Hour),
+		MaxEntries:          10,
+		StateFile:           t.TempDir() + "/state.json",
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.41")
@@ -249,14 +249,14 @@ func TestRejectedIPCachePrunesStrikesOutsideWindow(t *testing.T) {
 
 func TestRejectedIPCacheRefreshesOnlyRepeatBlockWithoutAddingStrike(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration:          config.Duration(time.Minute),
-		RejectedIPRepeatThreshold:        2,
-		RejectedIPRepeatWindow:           config.Duration(2 * time.Hour),
-		RejectedIPRepeatBlockDuration:    config.Duration(24 * time.Hour),
-		RejectedIPRepeatRefreshOnAttempt: true,
-		RejectedIPCacheSize:              10,
-		RejectedIPStateFile:              t.TempDir() + "/state.json",
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration:          config.Duration(time.Minute),
+		RepeatThreshold:        2,
+		RepeatWindow:           config.Duration(2 * time.Hour),
+		RepeatBlockDuration:    config.Duration(24 * time.Hour),
+		RepeatRefreshOnAttempt: true,
+		MaxEntries:             10,
+		StateFile:              t.TempDir() + "/state.json",
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.42")
@@ -272,13 +272,13 @@ func TestRejectedIPCacheRefreshesOnlyRepeatBlockWithoutAddingStrike(t *testing.T
 
 func TestRejectedIPCachePersistsReputation(t *testing.T) {
 	stateFile := t.TempDir() + "/state.json"
-	policy := config.PolicyConfig{
-		RejectedIPBlockDuration:       config.Duration(time.Minute),
-		RejectedIPRepeatThreshold:     2,
-		RejectedIPRepeatWindow:        config.Duration(time.Hour),
-		RejectedIPRepeatBlockDuration: config.Duration(24 * time.Hour),
-		RejectedIPCacheSize:           10,
-		RejectedIPStateFile:           stateFile,
+	policy := config.IPReputationConfig{
+		BlockDuration:       config.Duration(time.Minute),
+		RepeatThreshold:     2,
+		RepeatWindow:        config.Duration(time.Hour),
+		RepeatBlockDuration: config.Duration(24 * time.Hour),
+		MaxEntries:          10,
+		StateFile:           stateFile,
 	}
 	now := time.Now().UTC().Truncate(time.Second)
 	cache := newIPReputationStore(policy, nil)
@@ -297,13 +297,13 @@ func TestRejectedIPCachePersistsReputation(t *testing.T) {
 
 func TestRejectedIPCacheRepeatExpiryDiscardsStrikeHistory(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration:       config.Duration(time.Minute),
-		RejectedIPRepeatThreshold:     2,
-		RejectedIPRepeatWindow:        config.Duration(24 * time.Hour),
-		RejectedIPRepeatBlockDuration: config.Duration(time.Hour),
-		RejectedIPCacheSize:           10,
-		RejectedIPStateFile:           t.TempDir() + "/state.json",
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration:       config.Duration(time.Minute),
+		RepeatThreshold:     2,
+		RepeatWindow:        config.Duration(24 * time.Hour),
+		RepeatBlockDuration: config.Duration(time.Hour),
+		MaxEntries:          10,
+		StateFile:           t.TempDir() + "/state.json",
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.44")
@@ -323,14 +323,14 @@ func TestRejectedIPCacheRepeatExpiryDiscardsStrikeHistory(t *testing.T) {
 
 func TestRejectedIPCacheLegitimateMessagesRemoveOldestStrike(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration:       config.Duration(time.Minute),
-		RejectedIPRepeatThreshold:     3,
-		RejectedIPRepeatWindow:        config.Duration(24 * time.Hour),
-		RejectedIPRepeatBlockDuration: config.Duration(24 * time.Hour),
-		RejectedIPLegitimatePerStrike: 3,
-		RejectedIPCacheSize:           10,
-		RejectedIPStateFile:           t.TempDir() + "/state.json",
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration:       config.Duration(time.Minute),
+		RepeatThreshold:     3,
+		RepeatWindow:        config.Duration(24 * time.Hour),
+		RepeatBlockDuration: config.Duration(24 * time.Hour),
+		LegitimatePerStrike: 3,
+		MaxEntries:          10,
+		StateFile:           t.TempDir() + "/state.json",
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.45")
@@ -356,14 +356,14 @@ func TestRejectedIPCacheLegitimateMessagesRemoveOldestStrike(t *testing.T) {
 
 func TestRejectedIPCacheNewStrikeResetsLegitimateCredit(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration:       config.Duration(time.Minute),
-		RejectedIPRepeatThreshold:     3,
-		RejectedIPRepeatWindow:        config.Duration(time.Hour),
-		RejectedIPRepeatBlockDuration: config.Duration(time.Hour),
-		RejectedIPLegitimatePerStrike: 3,
-		RejectedIPCacheSize:           10,
-		RejectedIPStateFile:           t.TempDir() + "/state.json",
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration:       config.Duration(time.Minute),
+		RepeatThreshold:     3,
+		RepeatWindow:        config.Duration(time.Hour),
+		RepeatBlockDuration: config.Duration(time.Hour),
+		LegitimatePerStrike: 3,
+		MaxEntries:          10,
+		StateFile:           t.TempDir() + "/state.json",
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.46")
@@ -380,14 +380,14 @@ func TestRejectedIPCacheNewStrikeResetsLegitimateCredit(t *testing.T) {
 
 func TestRejectedIPCacheLegitimateDecayDoesNotCancelActiveBlock(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
-	cache := newIPReputationStore(config.PolicyConfig{
-		RejectedIPBlockDuration:       config.Duration(time.Hour),
-		RejectedIPRepeatThreshold:     3,
-		RejectedIPRepeatWindow:        config.Duration(24 * time.Hour),
-		RejectedIPRepeatBlockDuration: config.Duration(24 * time.Hour),
-		RejectedIPLegitimatePerStrike: 1,
-		RejectedIPCacheSize:           10,
-		RejectedIPStateFile:           t.TempDir() + "/state.json",
+	cache := newIPReputationStore(config.IPReputationConfig{
+		BlockDuration:       config.Duration(time.Hour),
+		RepeatThreshold:     3,
+		RepeatWindow:        config.Duration(24 * time.Hour),
+		RepeatBlockDuration: config.Duration(24 * time.Hour),
+		LegitimatePerStrike: 1,
+		MaxEntries:          10,
+		StateFile:           t.TempDir() + "/state.json",
 	}, nil)
 	cache.now = func() time.Time { return now }
 	addr := netip.MustParseAddr("192.0.2.47")

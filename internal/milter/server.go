@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/PhilAnderson1/SentinelMilter/internal/ai"
+	"github.com/PhilAnderson1/SentinelMilter/internal/attachment"
 	"github.com/PhilAnderson1/SentinelMilter/internal/config"
 	"github.com/PhilAnderson1/SentinelMilter/internal/message"
 )
@@ -37,11 +38,21 @@ type Server struct {
 	ipReputation   *ipReputationStore
 	correspondents *correspondentStore
 	resolver       dnsResolver
+	attachments    *attachment.Scanner
 	wg             sync.WaitGroup
 }
 
 func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.Milter.MaxConcurrent), ipReputation: newIPReputationStore(cfg.Policy, log), correspondents: newCorrespondentStore(cfg.CorrespondentAllowlist, log), resolver: net.DefaultResolver}
+	server := &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent), ipReputation: newIPReputationStore(cfg.IPReputation, log), correspondents: newCorrespondentStore(cfg.Correspondents, log), resolver: net.DefaultResolver}
+	if cfg.Attachments.Block {
+		server.attachments = attachment.New(attachment.Options{
+			BlockedExtensions: cfg.Attachments.BlockedExtensions, InspectSignatures: cfg.Attachments.InspectSignatures,
+			InspectArchives: cfg.Attachments.InspectArchives, MaxAttachmentBytes: cfg.Attachments.MaxAttachmentBytes,
+			MaxArchiveDepth: cfg.Attachments.MaxArchiveDepth, MaxArchiveFiles: cfg.Attachments.MaxArchiveFiles,
+			MaxArchiveUncompressedBytes: cfg.Attachments.MaxArchiveUncompressedBytes,
+		})
+	}
+	return server
 }
 
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
@@ -140,7 +151,7 @@ func (s *Server) logAIInput(msg *message.Message, input ai.Input) {
 
 func (s *Server) applyPolicy(decision ai.Decision) (action, action) {
 	proposed := actionAccept
-	if (decision.Classification == "spam" || decision.Classification == "scam") && decision.Score >= s.cfg.Policy.RejectScore {
+	if (decision.Classification == "spam" || decision.Classification == "scam") && decision.Score >= s.cfg.Filtering.RejectScore {
 		proposed = actionReject
 	}
 	selected := proposed
@@ -152,7 +163,7 @@ func (s *Server) applyPolicy(decision ai.Decision) (action, action) {
 
 func (s *Server) analysisFailure(err error, started time.Time) evaluationResult {
 	selected := actionAccept
-	if s.cfg.Mode == "enforce" && s.cfg.Policy.AIErrorAction == "tempfail" {
+	if s.cfg.Mode == "enforce" && s.cfg.Filtering.AIErrorAction == "tempfail" {
 		selected = actionTempfail
 	}
 	return evaluationResult{proposed: selected, selected: selected, err: err, latency: time.Since(started)}
@@ -161,7 +172,7 @@ func (s *Server) analysisFailure(err error, started time.Time) evaluationResult 
 func (s *Server) encodeAction(selected action) []byte {
 	switch selected {
 	case actionReject:
-		return replyCode("550", "5.7.1", s.cfg.Policy.RejectMessage)
+		return replyCode("550", "5.7.1", s.cfg.Filtering.RejectMessage)
 	case actionTempfail:
 		return []byte{responseTempfail}
 	default:

@@ -10,6 +10,7 @@ type Message struct {
 	Connection    ConnectionInfo
 	Correspondent CorrespondentInfo
 	Truncated     bool
+	BodyTruncated bool
 	MaxBytes      int64
 	bodySize      int64
 	headerSize    int64
@@ -71,6 +72,7 @@ const (
 
 var retainedHeaders = map[string]bool{
 	"authentication-results":    true,
+	"content-disposition":       true,
 	"content-transfer-encoding": true,
 	"content-type":              true,
 	"date":                      true,
@@ -108,11 +110,13 @@ func (m *Message) AddBody(p []byte) {
 	remaining := m.MaxBytes - m.bodySize
 	if remaining <= 0 {
 		m.Truncated = true
+		m.BodyTruncated = true
 		return
 	}
 	if int64(len(p)) > remaining {
 		p = p[:remaining]
 		m.Truncated = true
+		m.BodyTruncated = true
 	}
 	m.bodySize += int64(len(p))
 	_, _ = m.Body.Write(p)

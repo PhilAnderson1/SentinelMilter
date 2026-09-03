@@ -62,15 +62,15 @@ type ipReputationStore struct {
 	log                    *slog.Logger
 }
 
-func newIPReputationStore(policy config.PolicyConfig, log *slog.Logger) *ipReputationStore {
+func newIPReputationStore(reputation config.IPReputationConfig, log *slog.Logger) *ipReputationStore {
 	cache := &ipReputationStore{
-		entries: make(map[netip.Addr]rejectedIPRecord), shortDuration: policy.RejectedIPBlockDuration.Value(),
-		repeatThreshold: policy.RejectedIPRepeatThreshold, repeatWindow: policy.RejectedIPRepeatWindow.Value(),
-		repeatDuration: policy.RejectedIPRepeatBlockDuration.Value(), repeatRefreshOnAttempt: policy.RejectedIPRepeatRefreshOnAttempt,
-		legitimatePerStrike: policy.RejectedIPLegitimatePerStrike,
-		maxSize:             policy.RejectedIPCacheSize, stateFile: policy.RejectedIPStateFile, now: time.Now, log: log,
+		entries: make(map[netip.Addr]rejectedIPRecord), shortDuration: reputation.BlockDuration.Value(),
+		repeatThreshold: reputation.RepeatThreshold, repeatWindow: reputation.RepeatWindow.Value(),
+		repeatDuration: reputation.RepeatBlockDuration.Value(), repeatRefreshOnAttempt: reputation.RepeatRefreshOnAttempt,
+		legitimatePerStrike: reputation.LegitimatePerStrike,
+		maxSize:             reputation.MaxEntries, stateFile: reputation.StateFile, now: time.Now, log: log,
 	}
-	for _, entry := range policy.RejectedIPAllowlist {
+	for _, entry := range reputation.IPAllowlist {
 		if prefix, err := netip.ParsePrefix(entry); err == nil {
 			cache.allowlist = append(cache.allowlist, prefix)
 			continue
@@ -83,7 +83,7 @@ func newIPReputationStore(policy config.PolicyConfig, log *slog.Logger) *ipReput
 			cache.allowlist = append(cache.allowlist, netip.PrefixFrom(addr.Unmap(), bits))
 		}
 	}
-	for _, domain := range policy.RejectedIPDomainAllowlist {
+	for _, domain := range reputation.DomainAllowlist {
 		cache.domainAllowlist = append(cache.domainAllowlist, normalizeDomain(domain))
 	}
 	if cache.enabled() && cache.stateFile != "" {

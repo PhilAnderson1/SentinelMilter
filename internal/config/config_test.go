@@ -1,10 +1,53 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestLoadAcceptsNewSectionsAndRejectsLegacySections(t *testing.T) {
+	writeConfig := func(t *testing.T, content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "sentinelmilter.yaml")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	valid := `
+ai:
+  api_key: test-key
+  model: test-model
+  prompt_file: /tmp/test-prompt
+  max_concurrent: 3
+filtering:
+  reject_score: 0.8
+attachments:
+  block: false
+correspondents:
+  scope: global
+ip_reputation:
+  max_entries: 42
+logging:
+  level: warn
+`
+	cfg, err := Load(writeConfig(t, valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 {
+		t.Fatalf("new configuration sections not loaded: %#v", cfg)
+	}
+
+	legacy := valid + "\npolicy:\n  reject_score: 0.9\n"
+	if _, err := Load(writeConfig(t, legacy)); err == nil || !strings.Contains(err.Error(), "field policy not found") {
+		t.Fatalf("legacy policy section error = %v", err)
+	}
+}
 
 func validConfig() Config {
 	cfg := defaults()
@@ -15,13 +58,64 @@ func validConfig() Config {
 }
 
 func TestAuthenticatedMailScanningDefaultsEnabled(t *testing.T) {
-	if !defaults().Policy.ScanAuthenticated {
+	if !defaults().Filtering.ScanAuthenticated {
 		t.Fatal("authenticated mail scanning must default to enabled")
 	}
 }
 
+func TestValidateSenderDomainAllowlist(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*Config)
+		wantError string
+	}{
+		{
+			name: "valid sender domains",
+			configure: func(cfg *Config) {
+				cfg.Filtering.SenderDomainAllowlist = []string{"amazon.com", "MAIL.EXAMPLE.ORG."}
+				cfg.Filtering.SenderDomainAllowlistRequireDKIM = true
+			},
+		},
+		{
+			name: "wildcards are rejected",
+			configure: func(cfg *Config) {
+				cfg.Filtering.SenderDomainAllowlist = []string{"*.amazon.com"}
+			},
+			wantError: "invalid filtering.sender_domain_allowlist",
+		},
+		{
+			name: "DKIM requirement needs trusted authentication service",
+			configure: func(cfg *Config) {
+				cfg.Filtering.SenderDomainAllowlist = []string{"amazon.com"}
+				cfg.Filtering.SenderDomainAllowlistRequireDKIM = true
+				cfg.Correspondents.TrustedAuthservIDs = nil
+			},
+			wantError: "requires correspondents.trusted_authserv_ids",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := validConfig()
+			test.configure(&cfg)
+			err := cfg.Validate()
+			if test.wantError == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("validation error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestAttachmentBlockingDefaultsDisabled(t *testing.T) {
+	if defaults().Attachments.Block {
+		t.Fatal("attachment blocking must default to disabled for existing configurations")
+	}
+}
+
 func TestMTAHostnameIsDefaultTrustedAuthenticationService(t *testing.T) {
-	trusted := defaults().CorrespondentAllowlist.TrustedAuthservIDs
+	trusted := defaults().Correspondents.TrustedAuthservIDs
 	if len(trusted) != 1 || trusted[0] != MTAHostnameAuthservID {
 		t.Fatalf("default trusted authentication services = %q", trusted)
 	}
@@ -36,9 +130,9 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 		{
 			name: "valid IP CIDR and domain allowlists",
 			configure: func(cfg *Config) {
-				cfg.Policy.RejectedIPBlockDuration = Duration(15 * time.Minute)
-				cfg.Policy.RejectedIPAllowlist = []string{"192.0.2.1", "2001:db8::/32"}
-				cfg.Policy.RejectedIPDomainAllowlist = []string{"outlook.com", "MAIL.GOOGLE.COM."}
+				cfg.IPReputation.BlockDuration = Duration(15 * time.Minute)
+				cfg.IPReputation.IPAllowlist = []string{"192.0.2.1", "2001:db8::/32"}
+				cfg.IPReputation.DomainAllowlist = []string{"outlook.com", "MAIL.GOOGLE.COM."}
 			},
 		},
 		{
@@ -51,58 +145,58 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 		{
 			name: "negative duration",
 			configure: func(cfg *Config) {
-				cfg.Policy.RejectedIPBlockDuration = Duration(-time.Second)
+				cfg.IPReputation.BlockDuration = Duration(-time.Second)
 			},
-			wantError: "rejected_ip_block_duration",
+			wantError: "ip_reputation.block_duration",
 		},
 		{
 			name: "negative repeat threshold",
 			configure: func(cfg *Config) {
-				cfg.Policy.RejectedIPRepeatThreshold = -1
+				cfg.IPReputation.RepeatThreshold = -1
 			},
-			wantError: "rejected_ip_repeat_threshold",
+			wantError: "ip_reputation.repeat_threshold",
 		},
 		{
 			name: "negative legitimate messages per strike",
 			configure: func(cfg *Config) {
-				cfg.Policy.RejectedIPLegitimatePerStrike = -1
+				cfg.IPReputation.LegitimatePerStrike = -1
 			},
-			wantError: "rejected_ip_legitimate_messages_per_strike",
+			wantError: "ip_reputation.legitimate_messages_per_strike",
 		},
 		{
 			name: "zero repeat window when escalation enabled",
 			configure: func(cfg *Config) {
-				cfg.Policy.RejectedIPRepeatWindow = 0
+				cfg.IPReputation.RepeatWindow = 0
 			},
-			wantError: "rejected_ip_repeat_window",
+			wantError: "ip_reputation.repeat_window",
 		},
 		{
 			name: "missing state file when blocking enabled",
 			configure: func(cfg *Config) {
-				cfg.Policy.RejectedIPStateFile = ""
+				cfg.IPReputation.StateFile = ""
 			},
-			wantError: "rejected_ip_state_file",
+			wantError: "ip_reputation.state_file",
 		},
 		{
 			name: "zero cache size",
 			configure: func(cfg *Config) {
-				cfg.Policy.RejectedIPCacheSize = 0
+				cfg.IPReputation.MaxEntries = 0
 			},
-			wantError: "rejected_ip_cache_size",
+			wantError: "ip_reputation.max_entries",
 		},
 		{
 			name: "invalid allowlist entry",
 			configure: func(cfg *Config) {
-				cfg.Policy.RejectedIPAllowlist = []string{"not-an-address"}
+				cfg.IPReputation.IPAllowlist = []string{"not-an-address"}
 			},
-			wantError: "rejected_ip_allowlist",
+			wantError: "ip_reputation.ip_allowlist",
 		},
 		{
 			name: "invalid domain allowlist entry",
 			configure: func(cfg *Config) {
-				cfg.Policy.RejectedIPDomainAllowlist = []string{"*.outlook.com"}
+				cfg.IPReputation.DomainAllowlist = []string{"*.outlook.com"}
 			},
-			wantError: "rejected_ip_domain_allowlist",
+			wantError: "ip_reputation.domain_allowlist",
 		},
 		{
 			name: "invalid vision mode",
@@ -112,62 +206,99 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 			wantError: "vision_mode",
 		},
 		{
+			name: "enabled attachment policy without detection",
+			configure: func(cfg *Config) {
+				cfg.Attachments.Block = true
+				cfg.Attachments.BlockedExtensions = nil
+				cfg.Attachments.InspectSignatures = false
+			},
+			wantError: "requires blocked_extensions",
+		},
+		{
+			name: "invalid blocked attachment extension",
+			configure: func(cfg *Config) {
+				cfg.Attachments.BlockedExtensions = []string{"tar.gz"}
+			},
+			wantError: "blocked_extensions",
+		},
+		{
+			name: "invalid attachment limit",
+			configure: func(cfg *Config) {
+				cfg.Attachments.MaxArchiveFiles = 0
+			},
+			wantError: "attachments limits",
+		},
+		{
+			name: "invalid encrypted archive action",
+			configure: func(cfg *Config) {
+				cfg.Attachments.EncryptedArchiveAction = "allow"
+			},
+			wantError: "encrypted_archive_action",
+		},
+		{
+			name: "invalid unscannable action",
+			configure: func(cfg *Config) {
+				cfg.Attachments.UnscannableAction = "defer"
+			},
+			wantError: "unscannable_action",
+		},
+		{
 			name: "invalid correspondent scope",
 			configure: func(cfg *Config) {
-				cfg.CorrespondentAllowlist.Scope = "user"
+				cfg.Correspondents.Scope = "user"
 			},
-			wantError: "correspondent_allowlist.scope",
+			wantError: "correspondents.scope",
 		},
 		{
 			name: "invalid correspondent recipient matching policy",
 			configure: func(cfg *Config) {
-				cfg.CorrespondentAllowlist.RecipientMatch = "some"
+				cfg.Correspondents.RecipientMatch = "some"
 			},
-			wantError: "correspondent_allowlist.recipient_match",
+			wantError: "correspondents.recipient_match",
 		},
 		{
 			name: "negative correspondent stale duration",
 			configure: func(cfg *Config) {
-				cfg.CorrespondentAllowlist.StaleAfter = Duration(-time.Second)
+				cfg.Correspondents.StaleAfter = Duration(-time.Second)
 			},
-			wantError: "correspondent_allowlist.stale_after",
+			wantError: "correspondents.stale_after",
 		},
 		{
 			name: "negative correspondent activity update interval",
 			configure: func(cfg *Config) {
-				cfg.CorrespondentAllowlist.ActivityUpdateInterval = Duration(-time.Second)
+				cfg.Correspondents.ActivityUpdateInterval = Duration(-time.Second)
 			},
-			wantError: "correspondent_allowlist.activity_update_interval",
+			wantError: "correspondents.activity_update_interval",
 		},
 		{
 			name: "zero legitimate sender message threshold",
 			configure: func(cfg *Config) {
-				cfg.CorrespondentAllowlist.LegitimateSenderMinMessages = 0
+				cfg.Correspondents.LegitimateSenderMinMessages = 0
 			},
 			wantError: "legitimate_sender_min_messages",
 		},
 		{
 			name: "invalid legitimate sender score threshold",
 			configure: func(cfg *Config) {
-				cfg.CorrespondentAllowlist.LegitimateSenderMinScore = 1.01
+				cfg.Correspondents.LegitimateSenderMinScore = 1.01
 			},
 			wantError: "legitimate_sender_min_score",
 		},
 		{
 			name: "correspondent bypass without use",
 			configure: func(cfg *Config) {
-				cfg.CorrespondentAllowlist.BypassAI = true
-				cfg.CorrespondentAllowlist.TrustedAuthservIDs = []string{"mx.example.com"}
+				cfg.Correspondents.BypassAI = true
+				cfg.Correspondents.TrustedAuthservIDs = []string{"mx.example.com"}
 			},
 			wantError: "bypass_ai requires use_allowlist",
 		},
 		{
 			name: "correspondent bypass without trusted authentication service",
 			configure: func(cfg *Config) {
-				cfg.CorrespondentAllowlist.UseAllowlist = true
-				cfg.CorrespondentAllowlist.BypassAI = true
-				cfg.CorrespondentAllowlist.RequireDKIMForBypass = true
-				cfg.CorrespondentAllowlist.TrustedAuthservIDs = nil
+				cfg.Correspondents.UseAllowlist = true
+				cfg.Correspondents.BypassAI = true
+				cfg.Correspondents.RequireDKIMForBypass = true
+				cfg.Correspondents.TrustedAuthservIDs = nil
 			},
 			wantError: "requires trusted_authserv_ids",
 		},

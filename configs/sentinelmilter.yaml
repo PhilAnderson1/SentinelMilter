@@ -23,14 +23,11 @@ milter:
   timeout: 1m
 
   # Maximum time for DNS lookups (DNS evidence is used by the AI to classify emails).
-  connection_dns_timeout: 2s
+  connection_dns_timeout: 5s
 
   # Maximum message body bytes retained for analysis; positive integer.
   # Larger messages are truncated and the decision log records truncated=true.
-  max_message_size: 2097152
-
-  # Maximum number of simultaneous AI analyses; positive integer.
-  max_concurrent: 8
+  max_message_size: 10485760
 
 ai:
   # Full OpenRouter- or llama.cpp-compatible chat-completions URL.
@@ -59,13 +56,16 @@ ai:
   # Maximum duration of one AI request, using Go duration syntax. Must be > 0.
   timeout: 45s
 
+  # Maximum number of simultaneous AI analyses; positive integer.
+  max_concurrent: 8
+
   # Maximum number of message-text characters supplied to the AI; positive
   # integer. This is separate from milter.max_message_size, which is in bytes.
   max_body_chars: 50000
 
   # Image analysis detects scams concealed in images to evade text-based filtering.
   # Modes: off, fallback, or always. fallback analyses inline images only when
-  # insufficient body text is available. Requires a vision-capable model.
+  # insufficient body text is available. Requires a vision-capable AI model.
   vision_mode: fallback
   vision_min_text_chars: 200
 
@@ -80,13 +80,21 @@ ai:
   site_url: https://github.com/PhilAnderson1/SentinelMilter
   app_name: SentinelMilter
 
-policy:
-  # Reject spam or scam classifications at or above this confidence score (0–1).
+filtering:
+  # Reject spam or scam classifications at or above this confidence score (0-1).
   reject_score: 0.9
 
-  # Scan email sent by authenticated users. Disable to bypass AI analysis of
-  # outbound mail.
-  scan_authenticated: true
+  # Scan email sent by authenticated users. Disable to bypass attachment and AI
+  # analysis of outbound mail.
+  scan_authenticated: false
+
+  # Visible From domains that bypass AI scanning. Entries also match subdomains.
+  sender_domain_allowlist:
+    - amazon.com
+    - amazon.co.uk
+
+  # Require trusted, aligned DKIM authentication for the domain bypass.
+  sender_domain_allowlist_require_dkim: true
 
   # Action when AI analysis fails: accept or tempfail. tempfail asks the sending
   # mail server to retry later. Monitor mode always accepts.
@@ -96,37 +104,85 @@ policy:
   # Keep this on one line; NUL and newline characters are removed.
   reject_message: Message rejected as suspected spam or fraud
 
+attachments:
+  # Block executable attachments before AI analysis.
+  block: true
+
+  # Filename extensions to block, including inside supported archives.
+  blocked_extensions:
+    - exe
+    - com
+    - scr
+    - pif
+    - bat
+    - cmd
+    - ps1
+    - vbs
+    - js
+    - jse
+    - msi
+    - dll
+    - jar
+    - lnk
+    - iso
+    # 7z and RAR archives are blocked because SentinelMilter cannot decompress
+    # and inspect their contents, not because the formats are executable.
+    - 7z
+    - rar
+
+  # Detect Windows PE, ELF, Mach-O, and executable script signatures even when
+  # the filename extension has been disguised.
+  inspect_file_signatures: true
+
+  # Inspect the contents of ZIP, TAR, GZIP, and BZIP2 attachments.
+  inspect_archives: true
+
+  # Safety limits for attachments and decompressed archive contents.
+  max_attachment_bytes: 10485760
+  archive_max_depth: 2
+  archive_max_files: 100
+  archive_max_uncompressed_bytes: 52428800
+
+  # Action for encrypted archives and content that cannot be fully inspected:
+  # accept, reject, or tempfail. Monitor mode always accepts.
+  encrypted_archive_action: reject
+  unscannable_action: accept
+
+  # Text returned with SMTP status 550 5.7.1 when attachment policy rejects mail.
+  reject_message: Message rejected because it contains a prohibited executable attachment
+
+ip_reputation:
   # Temporarily blacklist the sending IP after rejecting an email, avoiding further
   # AI requests. Uses Go duration syntax; 0s disables.
-  rejected_ip_block_duration: 60m
+  block_duration: 60m
 
   # Rejections within the rolling window required for longer IP blacklisting.
   # Set to 0 to disable escalation.
-  rejected_ip_repeat_threshold: 3
-  rejected_ip_repeat_window: 720h
-  rejected_ip_repeat_block_duration: 720h
+  repeat_threshold: 3
+  repeat_window: 720h
+  repeat_block_duration: 720h
 
   # Extend the repeat-offender blacklisting timeout after each delivery attempt.
-  rejected_ip_repeat_refresh_on_attempt: true
+  repeat_refresh_on_attempt: true
 
   # Legitimate emails required to remove one IP strike. Set to 0 to disable.
-  rejected_ip_legitimate_messages_per_strike: 3
+  legitimate_messages_per_strike: 3
 
   # Maximum stored sending IP records; positive integer.
-  rejected_ip_cache_size: 10000
+  max_entries: 10000
 
   # Persistent reputation state. Strikes and active blocks survive restarts.
-  rejected_ip_state_file: /var/lib/sentinelmilter/rejected-ip-state.json
+  state_file: /var/lib/sentinelmilter/rejected-ip-state.json
 
   # Exact IP addresses or CIDR ranges that must never be added to the rejection
   # cache. Add trusted relays and shared forwarding services here as needed.
-  rejected_ip_allowlist:
+  ip_allowlist:
     - 127.0.0.0/8
     - ::1/128
 
   # Never blacklist IPs with forward-confirmed reverse DNS matching these domains
   # or their subdomains.
-  rejected_ip_domain_allowlist:
+  domain_allowlist:
     - google.com
     - outlook.com
     - yahoo.com
@@ -140,7 +196,7 @@ policy:
     - gmx.net
     - web.de
 
-correspondent_allowlist:
+correspondents:
   # Add recipients of accepted email sent by authenticated users to the
   # correspondent allowlist.
   learn_authenticated_recipients: true
@@ -151,7 +207,7 @@ correspondent_allowlist:
   # Number of legitimate emails required to allowlist an inbound sender, and the
   # minimum confidence score each email must meet.
   legitimate_sender_min_messages: 5
-  legitimate_sender_min_score: 0.99
+  legitimate_sender_min_score: 0.95
 
   # Boolean: require trusted aligned DKIM before an inbound legitimate result
   # contributes toward automatic whitelisting.

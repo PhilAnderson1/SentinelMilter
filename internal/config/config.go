@@ -26,19 +26,34 @@ func (d *Duration) UnmarshalText(text []byte) error {
 func (d Duration) Value() time.Duration { return time.Duration(d) }
 
 type Config struct {
-	Mode                   string                       `yaml:"mode"`
-	Milter                 MilterConfig                 `yaml:"milter"`
-	AI                     AIConfig                     `yaml:"ai"`
-	Policy                 PolicyConfig                 `yaml:"policy"`
-	CorrespondentAllowlist CorrespondentAllowlistConfig `yaml:"correspondent_allowlist"`
-	Logging                LoggingConfig                `yaml:"logging"`
+	Mode           string               `yaml:"mode"`
+	Milter         MilterConfig         `yaml:"milter"`
+	AI             AIConfig             `yaml:"ai"`
+	Filtering      FilteringConfig      `yaml:"filtering"`
+	Attachments    AttachmentsConfig    `yaml:"attachments"`
+	Correspondents CorrespondentsConfig `yaml:"correspondents"`
+	IPReputation   IPReputationConfig   `yaml:"ip_reputation"`
+	Logging        LoggingConfig        `yaml:"logging"`
+}
+
+type AttachmentsConfig struct {
+	Block                       bool     `yaml:"block"`
+	BlockedExtensions           []string `yaml:"blocked_extensions"`
+	InspectSignatures           bool     `yaml:"inspect_file_signatures"`
+	InspectArchives             bool     `yaml:"inspect_archives"`
+	MaxAttachmentBytes          int64    `yaml:"max_attachment_bytes"`
+	MaxArchiveDepth             int      `yaml:"archive_max_depth"`
+	MaxArchiveFiles             int      `yaml:"archive_max_files"`
+	MaxArchiveUncompressedBytes int64    `yaml:"archive_max_uncompressed_bytes"`
+	EncryptedArchiveAction      string   `yaml:"encrypted_archive_action"`
+	UnscannableAction           string   `yaml:"unscannable_action"`
+	RejectMessage               string   `yaml:"reject_message"`
 }
 type MilterConfig struct {
 	Socket               string   `yaml:"socket"`
 	Timeout              Duration `yaml:"timeout"`
 	ConnectionDNSTimeout Duration `yaml:"connection_dns_timeout"`
 	MaxMessageSize       int64    `yaml:"max_message_size"`
-	MaxConcurrent        int      `yaml:"max_concurrent"`
 }
 type AIConfig struct {
 	Endpoint           string   `yaml:"endpoint"`
@@ -48,6 +63,7 @@ type AIConfig struct {
 	DisableThinking    bool     `yaml:"disable_thinking"`
 	PromptFile         string   `yaml:"prompt_file"`
 	Timeout            Duration `yaml:"timeout"`
+	MaxConcurrent      int      `yaml:"max_concurrent"`
 	MaxBodyChars       int      `yaml:"max_body_chars"`
 	VisionMode         string   `yaml:"vision_mode"`
 	VisionMinTextChars int      `yaml:"vision_min_text_chars"`
@@ -57,21 +73,25 @@ type AIConfig struct {
 	SiteURL            string   `yaml:"site_url"`
 	AppName            string   `yaml:"app_name"`
 }
-type PolicyConfig struct {
+type FilteringConfig struct {
 	RejectScore                      float64  `yaml:"reject_score"`
 	AIErrorAction                    string   `yaml:"ai_error_action"`
 	RejectMessage                    string   `yaml:"reject_message"`
 	ScanAuthenticated                bool     `yaml:"scan_authenticated"`
-	RejectedIPBlockDuration          Duration `yaml:"rejected_ip_block_duration"`
-	RejectedIPRepeatThreshold        int      `yaml:"rejected_ip_repeat_threshold"`
-	RejectedIPRepeatWindow           Duration `yaml:"rejected_ip_repeat_window"`
-	RejectedIPRepeatBlockDuration    Duration `yaml:"rejected_ip_repeat_block_duration"`
-	RejectedIPRepeatRefreshOnAttempt bool     `yaml:"rejected_ip_repeat_refresh_on_attempt"`
-	RejectedIPLegitimatePerStrike    int      `yaml:"rejected_ip_legitimate_messages_per_strike"`
-	RejectedIPCacheSize              int      `yaml:"rejected_ip_cache_size"`
-	RejectedIPStateFile              string   `yaml:"rejected_ip_state_file"`
-	RejectedIPAllowlist              []string `yaml:"rejected_ip_allowlist"`
-	RejectedIPDomainAllowlist        []string `yaml:"rejected_ip_domain_allowlist"`
+	SenderDomainAllowlist            []string `yaml:"sender_domain_allowlist"`
+	SenderDomainAllowlistRequireDKIM bool     `yaml:"sender_domain_allowlist_require_dkim"`
+}
+type IPReputationConfig struct {
+	BlockDuration          Duration `yaml:"block_duration"`
+	RepeatThreshold        int      `yaml:"repeat_threshold"`
+	RepeatWindow           Duration `yaml:"repeat_window"`
+	RepeatBlockDuration    Duration `yaml:"repeat_block_duration"`
+	RepeatRefreshOnAttempt bool     `yaml:"repeat_refresh_on_attempt"`
+	LegitimatePerStrike    int      `yaml:"legitimate_messages_per_strike"`
+	MaxEntries             int      `yaml:"max_entries"`
+	StateFile              string   `yaml:"state_file"`
+	IPAllowlist            []string `yaml:"ip_allowlist"`
+	DomainAllowlist        []string `yaml:"domain_allowlist"`
 }
 type LoggingConfig struct {
 	Level          string `yaml:"level"`
@@ -79,7 +99,7 @@ type LoggingConfig struct {
 	IncludeAIInput bool   `yaml:"include_ai_input"`
 }
 
-type CorrespondentAllowlistConfig struct {
+type CorrespondentsConfig struct {
 	LearnAuthenticatedRecipients bool     `yaml:"learn_authenticated_recipients"`
 	LearnLegitimateSenders       bool     `yaml:"learn_legitimate_senders"`
 	LegitimateSenderMinMessages  int      `yaml:"legitimate_sender_min_messages"`
@@ -122,21 +142,32 @@ func defaults() Config {
 		Mode: "monitor",
 		Milter: MilterConfig{
 			Socket: "unix:/run/sentinelmilter/sentinelmilter.sock", Timeout: Duration(30 * time.Second),
-			ConnectionDNSTimeout: Duration(2 * time.Second), MaxMessageSize: 2 << 20, MaxConcurrent: 8,
+			ConnectionDNSTimeout: Duration(2 * time.Second), MaxMessageSize: 10 << 20,
 		},
 		AI: AIConfig{
 			Endpoint: "https://openrouter.ai/api/v1/chat/completions", Timeout: Duration(15 * time.Second),
-			MaxBodyChars: 50000, VisionMode: "off", VisionMinTextChars: 200,
+			MaxConcurrent: 8,
+			MaxBodyChars:  50000, VisionMode: "off", VisionMinTextChars: 200,
 			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000, AppName: "SentinelMilter",
 		},
-		Policy: PolicyConfig{
-			RejectScore: .95, AIErrorAction: "accept", RejectMessage: "Message rejected as suspected spam or fraud",
-			ScanAuthenticated: true, RejectedIPRepeatThreshold: 3,
-			RejectedIPRepeatWindow: Duration(30 * 24 * time.Hour), RejectedIPRepeatBlockDuration: Duration(30 * 24 * time.Hour),
-			RejectedIPRepeatRefreshOnAttempt: true, RejectedIPLegitimatePerStrike: 3,
-			RejectedIPCacheSize: 10000, RejectedIPStateFile: "/var/lib/sentinelmilter/rejected-ip-state.json",
+		Attachments: AttachmentsConfig{
+			BlockedExtensions: []string{"exe", "com", "scr", "pif", "bat", "cmd", "ps1", "vbs", "js", "jse", "msi", "dll", "jar", "lnk", "iso", "7z", "rar"},
+			InspectSignatures: true, InspectArchives: true, MaxAttachmentBytes: 10 << 20,
+			MaxArchiveDepth: 2, MaxArchiveFiles: 100, MaxArchiveUncompressedBytes: 50 << 20,
+			EncryptedArchiveAction: "reject", UnscannableAction: "accept",
+			RejectMessage: "Message rejected because it contains a prohibited executable attachment",
 		},
-		CorrespondentAllowlist: CorrespondentAllowlistConfig{
+		Filtering: FilteringConfig{
+			RejectScore: .95, AIErrorAction: "accept", RejectMessage: "Message rejected as suspected spam or fraud",
+			ScanAuthenticated: true, SenderDomainAllowlistRequireDKIM: true,
+		},
+		IPReputation: IPReputationConfig{
+			RepeatThreshold: 3, RepeatWindow: Duration(30 * 24 * time.Hour),
+			RepeatBlockDuration: Duration(30 * 24 * time.Hour), RepeatRefreshOnAttempt: true,
+			LegitimatePerStrike: 3, MaxEntries: 10000,
+			StateFile: "/var/lib/sentinelmilter/rejected-ip-state.json",
+		},
+		Correspondents: CorrespondentsConfig{
 			LegitimateSenderMinMessages: 5, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
 			Scope: "per_sender", RecipientMatch: "all", File: "/var/lib/sentinelmilter/correspondent-allowlist.json",
 			TrustedAuthservIDs: []string{MTAHostnameAuthservID}, MaxEntries: 10000,
@@ -150,7 +181,7 @@ func (c Config) Validate() error {
 	if c.Mode != "monitor" && c.Mode != "enforce" {
 		return fmt.Errorf("mode must be monitor or enforce")
 	}
-	if c.Milter.Socket == "" || (c.Milter.MaxMessageSize < 1) || c.Milter.MaxConcurrent < 1 {
+	if c.Milter.Socket == "" || c.Milter.MaxMessageSize < 1 {
 		return fmt.Errorf("invalid milter settings")
 	}
 	if c.Milter.ConnectionDNSTimeout.Value() < 0 {
@@ -162,8 +193,8 @@ func (c Config) Validate() error {
 	if c.AI.APIKey == "" {
 		return fmt.Errorf("ai api_key is empty (and api_key_env is unset or empty)")
 	}
-	if c.AI.Timeout.Value() <= 0 || c.AI.MaxBodyChars < 1 {
-		return fmt.Errorf("invalid ai timeout or max_body_chars")
+	if c.AI.Timeout.Value() <= 0 || c.AI.MaxConcurrent < 1 || c.AI.MaxBodyChars < 1 {
+		return fmt.Errorf("invalid ai timeout, max_concurrent, or max_body_chars")
 	}
 	if c.AI.VisionMode != "off" && c.AI.VisionMode != "fallback" && c.AI.VisionMode != "always" {
 		return fmt.Errorf("ai.vision_mode must be off, fallback, or always")
@@ -171,86 +202,129 @@ func (c Config) Validate() error {
 	if c.AI.VisionMinTextChars < 0 || c.AI.MaxImages < 1 || c.AI.MaxImageBytes < 1 || c.AI.MaxImagePixels < 1 {
 		return fmt.Errorf("invalid AI vision limits")
 	}
-	if c.Policy.RejectScore < 0 || c.Policy.RejectScore > 1 {
-		return fmt.Errorf("policy.reject_score must be between 0 and 1")
+	attachments := c.Attachments
+	if attachments.Block && len(attachments.BlockedExtensions) == 0 && !attachments.InspectSignatures {
+		return fmt.Errorf("attachments requires blocked_extensions or inspect_file_signatures when block is true")
 	}
-	if c.Policy.AIErrorAction != "accept" && c.Policy.AIErrorAction != "tempfail" {
-		return fmt.Errorf("policy.ai_error_action must be accept or tempfail")
+	if attachments.MaxAttachmentBytes < 1 || attachments.MaxAttachmentBytes > 64<<20 ||
+		attachments.MaxArchiveDepth < 1 || attachments.MaxArchiveDepth > 8 ||
+		attachments.MaxArchiveFiles < 1 || attachments.MaxArchiveFiles > 10_000 ||
+		attachments.MaxArchiveUncompressedBytes < 1 || attachments.MaxArchiveUncompressedBytes > 1<<30 {
+		return fmt.Errorf("invalid attachments limits")
 	}
-	if c.Policy.RejectedIPBlockDuration.Value() < 0 {
-		return fmt.Errorf("policy.rejected_ip_block_duration must not be negative")
+	for _, extension := range attachments.BlockedExtensions {
+		extension = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(extension)), ".")
+		if extension == "" {
+			return fmt.Errorf("attachments.blocked_extensions contains an empty extension")
+		}
+		for _, char := range extension {
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+				return fmt.Errorf("invalid attachments.blocked_extensions entry %q", extension)
+			}
+		}
 	}
-	if c.Policy.RejectedIPRepeatThreshold < 0 {
-		return fmt.Errorf("policy.rejected_ip_repeat_threshold must not be negative")
+	if !validAttachmentAction(attachments.EncryptedArchiveAction) {
+		return fmt.Errorf("attachments.encrypted_archive_action must be accept, reject, or tempfail")
 	}
-	if c.Policy.RejectedIPRepeatWindow.Value() < 0 {
-		return fmt.Errorf("policy.rejected_ip_repeat_window must not be negative")
+	if !validAttachmentAction(attachments.UnscannableAction) {
+		return fmt.Errorf("attachments.unscannable_action must be accept, reject, or tempfail")
 	}
-	if c.Policy.RejectedIPRepeatBlockDuration.Value() < 0 {
-		return fmt.Errorf("policy.rejected_ip_repeat_block_duration must not be negative")
+	if strings.TrimSpace(attachments.RejectMessage) == "" {
+		return fmt.Errorf("attachments.reject_message must not be empty")
 	}
-	if c.Policy.RejectedIPLegitimatePerStrike < 0 {
-		return fmt.Errorf("policy.rejected_ip_legitimate_messages_per_strike must not be negative")
+	if c.Filtering.RejectScore < 0 || c.Filtering.RejectScore > 1 {
+		return fmt.Errorf("filtering.reject_score must be between 0 and 1")
 	}
-	if c.Policy.RejectedIPRepeatThreshold > 0 && (c.Policy.RejectedIPRepeatWindow.Value() == 0 || c.Policy.RejectedIPRepeatBlockDuration.Value() == 0) {
-		return fmt.Errorf("policy.rejected_ip_repeat_window and rejected_ip_repeat_block_duration must be positive when repeat escalation is enabled")
+	if c.Filtering.AIErrorAction != "accept" && c.Filtering.AIErrorAction != "tempfail" {
+		return fmt.Errorf("filtering.ai_error_action must be accept or tempfail")
 	}
-	if (c.Policy.RejectedIPBlockDuration.Value() > 0 || c.Policy.RejectedIPRepeatThreshold > 0) && strings.TrimSpace(c.Policy.RejectedIPStateFile) == "" {
-		return fmt.Errorf("policy.rejected_ip_state_file is required when IP blocking is enabled")
+	for _, domain := range c.Filtering.SenderDomainAllowlist {
+		if !validDomainName(domain) {
+			return fmt.Errorf("invalid filtering.sender_domain_allowlist entry %q", domain)
+		}
 	}
-	if c.Policy.RejectedIPCacheSize < 1 {
-		return fmt.Errorf("policy.rejected_ip_cache_size must be positive")
+	if len(c.Filtering.SenderDomainAllowlist) > 0 && c.Filtering.SenderDomainAllowlistRequireDKIM && len(c.Correspondents.TrustedAuthservIDs) == 0 {
+		return fmt.Errorf("filtering.sender_domain_allowlist_require_dkim requires correspondents.trusted_authserv_ids")
 	}
-	for _, entry := range c.Policy.RejectedIPAllowlist {
+	reputation := c.IPReputation
+	if reputation.BlockDuration.Value() < 0 {
+		return fmt.Errorf("ip_reputation.block_duration must not be negative")
+	}
+	if reputation.RepeatThreshold < 0 {
+		return fmt.Errorf("ip_reputation.repeat_threshold must not be negative")
+	}
+	if reputation.RepeatWindow.Value() < 0 {
+		return fmt.Errorf("ip_reputation.repeat_window must not be negative")
+	}
+	if reputation.RepeatBlockDuration.Value() < 0 {
+		return fmt.Errorf("ip_reputation.repeat_block_duration must not be negative")
+	}
+	if reputation.LegitimatePerStrike < 0 {
+		return fmt.Errorf("ip_reputation.legitimate_messages_per_strike must not be negative")
+	}
+	if reputation.RepeatThreshold > 0 && (reputation.RepeatWindow.Value() == 0 || reputation.RepeatBlockDuration.Value() == 0) {
+		return fmt.Errorf("ip_reputation.repeat_window and repeat_block_duration must be positive when repeat escalation is enabled")
+	}
+	if (reputation.BlockDuration.Value() > 0 || reputation.RepeatThreshold > 0) && strings.TrimSpace(reputation.StateFile) == "" {
+		return fmt.Errorf("ip_reputation.state_file is required when IP blocking is enabled")
+	}
+	if reputation.MaxEntries < 1 {
+		return fmt.Errorf("ip_reputation.max_entries must be positive")
+	}
+	for _, entry := range reputation.IPAllowlist {
 		if _, err := netip.ParsePrefix(entry); err == nil {
 			continue
 		}
 		if _, err := netip.ParseAddr(entry); err != nil {
-			return fmt.Errorf("invalid policy.rejected_ip_allowlist entry %q", entry)
+			return fmt.Errorf("invalid ip_reputation.ip_allowlist entry %q", entry)
 		}
 	}
-	for _, domain := range c.Policy.RejectedIPDomainAllowlist {
+	for _, domain := range reputation.DomainAllowlist {
 		if !validDomainName(domain) {
-			return fmt.Errorf("invalid policy.rejected_ip_domain_allowlist entry %q", domain)
+			return fmt.Errorf("invalid ip_reputation.domain_allowlist entry %q", domain)
 		}
 	}
-	allowlist := c.CorrespondentAllowlist
+	allowlist := c.Correspondents
 	if allowlist.Scope != "global" && allowlist.Scope != "per_sender" {
-		return fmt.Errorf("correspondent_allowlist.scope must be global or per_sender")
+		return fmt.Errorf("correspondents.scope must be global or per_sender")
 	}
 	if allowlist.RecipientMatch != "all" && allowlist.RecipientMatch != "any" {
-		return fmt.Errorf("correspondent_allowlist.recipient_match must be all or any")
+		return fmt.Errorf("correspondents.recipient_match must be all or any")
 	}
 	if allowlist.MaxEntries < 1 {
-		return fmt.Errorf("correspondent_allowlist.max_entries must be positive")
+		return fmt.Errorf("correspondents.max_entries must be positive")
 	}
 	if allowlist.LegitimateSenderMinMessages < 1 {
-		return fmt.Errorf("correspondent_allowlist.legitimate_sender_min_messages must be positive")
+		return fmt.Errorf("correspondents.legitimate_sender_min_messages must be positive")
 	}
 	if allowlist.LegitimateSenderMinScore < 0 || allowlist.LegitimateSenderMinScore > 1 {
-		return fmt.Errorf("correspondent_allowlist.legitimate_sender_min_score must be between 0 and 1")
+		return fmt.Errorf("correspondents.legitimate_sender_min_score must be between 0 and 1")
 	}
 	if allowlist.StaleAfter.Value() < 0 {
-		return fmt.Errorf("correspondent_allowlist.stale_after must not be negative")
+		return fmt.Errorf("correspondents.stale_after must not be negative")
 	}
 	if allowlist.ActivityUpdateInterval.Value() < 0 {
-		return fmt.Errorf("correspondent_allowlist.activity_update_interval must not be negative")
+		return fmt.Errorf("correspondents.activity_update_interval must not be negative")
 	}
 	if (allowlist.LearnAuthenticatedRecipients || allowlist.UseAllowlist) && strings.TrimSpace(allowlist.File) == "" {
-		return fmt.Errorf("correspondent_allowlist.file is required when the feature is enabled")
+		return fmt.Errorf("correspondents.file is required when the feature is enabled")
 	}
 	if allowlist.BypassAI && !allowlist.UseAllowlist {
-		return fmt.Errorf("correspondent_allowlist.bypass_ai requires use_allowlist")
+		return fmt.Errorf("correspondents.bypass_ai requires use_allowlist")
 	}
 	if allowlist.BypassAI && allowlist.RequireDKIMForBypass && len(allowlist.TrustedAuthservIDs) == 0 {
-		return fmt.Errorf("correspondent_allowlist.require_dkim_for_bypass requires trusted_authserv_ids")
+		return fmt.Errorf("correspondents.require_dkim_for_bypass requires trusted_authserv_ids")
 	}
 	for _, authservID := range allowlist.TrustedAuthservIDs {
 		if authservID != MTAHostnameAuthservID && !validDomainName(authservID) {
-			return fmt.Errorf("invalid correspondent_allowlist.trusted_authserv_ids entry %q", authservID)
+			return fmt.Errorf("invalid correspondents.trusted_authserv_ids entry %q", authservID)
 		}
 	}
 	return nil
+}
+
+func validAttachmentAction(value string) bool {
+	return value == "accept" || value == "reject" || value == "tempfail"
 }
 
 func validDomainName(value string) bool {

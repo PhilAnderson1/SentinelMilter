@@ -76,3 +76,18 @@ func authenticationDomainAligned(authenticatedDomain, fromDomain string) bool {
 	}
 	return authenticatedDomain == fromDomain
 }
+
+func allowedSenderDomain(fromAddress string, allowedDomains []string) string {
+	address := normalizeEmailAddress(fromAddress)
+	separator := strings.LastIndexByte(address, '@')
+	if separator < 0 {
+		return ""
+	}
+	fromDomain := normalizeDomain(address[separator+1:])
+	for _, allowed := range allowedDomains {
+		if domainMatches(fromDomain, normalizeDomain(allowed)) {
+			return fromDomain
+		}
+	}
+	return ""
+}

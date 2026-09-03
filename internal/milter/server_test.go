@@ -63,10 +63,10 @@ func testServer(t *testing.T, analyzer Analyzer) (*Server, net.Conn, <-chan stru
 	t.Helper()
 	serverConn, clientConn := net.Pipe()
 	cfg := config.Config{
-		Mode:   "enforce",
-		Milter: config.MilterConfig{Timeout: config.Duration(200 * time.Millisecond), MaxMessageSize: 1024, MaxConcurrent: 1},
-		AI:     config.AIConfig{Timeout: config.Duration(time.Second), MaxBodyChars: 1024},
-		Policy: config.PolicyConfig{RejectScore: 0.9, AIErrorAction: "accept", RejectMessage: "blocked"},
+		Mode:      "enforce",
+		Milter:    config.MilterConfig{Timeout: config.Duration(200 * time.Millisecond), MaxMessageSize: 1024},
+		AI:        config.AIConfig{Timeout: config.Duration(time.Second), MaxConcurrent: 1, MaxBodyChars: 1024},
+		Filtering: config.FilteringConfig{RejectScore: 0.9, AIErrorAction: "accept", RejectMessage: "blocked"},
 	}
 	s := NewServer(cfg, analyzer, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	done := make(chan struct{})
@@ -220,8 +220,8 @@ func TestAIInputDiagnosticLoggingIsExplicitAndOmitsImageData(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	server := NewServer(config.Config{
-		Milter: config.MilterConfig{MaxConcurrent: 1},
-		Policy: config.PolicyConfig{RejectedIPCacheSize: 1},
+		AI:           config.AIConfig{MaxConcurrent: 1},
+		IPReputation: config.IPReputationConfig{MaxEntries: 1},
 	}, fixedAnalyzer{}, logger)
 
 	server.logAIInput(msg, input)
@@ -253,10 +253,10 @@ func TestRejectedIPDomainAllowlistReusesConnectionDNS(t *testing.T) {
 		Classification: "scam", Score: 1, Reasons: []string{"test"},
 	}})
 	server.cfg.Milter.ConnectionDNSTimeout = config.Duration(time.Second)
-	server.cfg.Policy.RejectedIPBlockDuration = config.Duration(time.Hour)
-	server.cfg.Policy.RejectedIPCacheSize = 100
-	server.cfg.Policy.RejectedIPDomainAllowlist = []string{"google.com"}
-	server.ipReputation = newIPReputationStore(server.cfg.Policy, server.log)
+	server.cfg.IPReputation.BlockDuration = config.Duration(time.Hour)
+	server.cfg.IPReputation.MaxEntries = 100
+	server.cfg.IPReputation.DomainAllowlist = []string{"google.com"}
+	server.ipReputation = newIPReputationStore(server.cfg.IPReputation, server.log)
 	resolver := &connectionTestResolver{
 		ptr: []string{"smtp.google.com."},
 		forward: map[string][]net.IPAddr{
@@ -414,7 +414,7 @@ func TestParseMTAHostnameMacro(t *testing.T) {
 func TestAuthenticatedMessagesCanBypassAndAuthenticationPersists(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 	server, conn, _ := testServer(t, analyzer)
-	server.cfg.Policy.ScanAuthenticated = false
+	server.cfg.Filtering.ScanAuthenticated = false
 	defer conn.Close()
 
 	negotiate(t, conn)
@@ -459,7 +459,7 @@ func TestAuthenticatedMessagesCanBypassAndAuthenticationPersists(t *testing.T) {
 func TestAuthenticatedMessagesAreScannedWhenEnabled(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 	server, conn, _ := testServer(t, analyzer)
-	server.cfg.Policy.ScanAuthenticated = true
+	server.cfg.Filtering.ScanAuthenticated = true
 	defer conn.Close()
 
 	negotiate(t, conn)
@@ -478,15 +478,63 @@ func TestAuthenticatedMessagesAreScannedWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestSenderDomainAllowlistBypassPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		from           string
+		authentication string
+		requireDKIM    bool
+		wantAICalls    int32
+	}{
+		{name: "exact domain without authentication requirement", from: "Orders <orders@amazon.com>", wantAICalls: 0},
+		{name: "subdomain match", from: "Orders <orders@mail.amazon.com>", wantAICalls: 0},
+		{name: "unrelated domain", from: "Orders <orders@amazon.example>", wantAICalls: 1},
+		{name: "aligned trusted DKIM", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; dkim=pass header.d=amazon.com", requireDKIM: true, wantAICalls: 0},
+		{name: "missing DKIM", from: "Orders <orders@amazon.com>", requireDKIM: true, wantAICalls: 1},
+		{name: "unaligned DKIM", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; dkim=pass header.d=attacker.example", requireDKIM: true, wantAICalls: 1},
+		{name: "untrusted authentication results", from: "Orders <orders@amazon.com>", authentication: "attacker.example; dkim=pass header.d=amazon.com", requireDKIM: true, wantAICalls: 1},
+		{name: "DMARC alone is insufficient", from: "Orders <orders@amazon.com>", authentication: "nl.invades.net; dmarc=pass header.from=amazon.com", requireDKIM: true, wantAICalls: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
+			server, conn, done := testServer(t, analyzer)
+			server.cfg.Filtering.SenderDomainAllowlist = []string{"amazon.com"}
+			server.cfg.Filtering.SenderDomainAllowlistRequireDKIM = test.requireDKIM
+			server.cfg.Correspondents.TrustedAuthservIDs = []string{"nl.invades.net"}
+			defer func() {
+				_ = conn.Close()
+				<-done
+			}()
+
+			negotiate(t, conn)
+			sendContinueFrames(t, conn,
+				connectFrame('4', "127.0.0.1"),
+				envelopeFrame(commandMail, "sender@example.com"),
+				envelopeFrame(commandRecipient, "recipient@example.net"),
+				headerFrame("From", test.from),
+				headerFrame("Authentication-Results", test.authentication),
+				[]byte{commandEndHeaders},
+			)
+			if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
+				t.Fatal(err)
+			}
+			expectFrame(t, conn, string([]byte{responseAccept}))
+			if got := analyzer.calls.Load(); got != test.wantAICalls {
+				t.Fatalf("AI analysis calls = %d, want %d", got, test.wantAICalls)
+			}
+		})
+	}
+}
+
 func TestAuthenticatedAcceptedMessageLearnsEnvelopeRecipients(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 	server, conn, _ := testServer(t, analyzer)
-	cfg := config.CorrespondentAllowlistConfig{
+	cfg := config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100,
 	}
-	server.cfg.Policy.ScanAuthenticated = false
-	server.cfg.CorrespondentAllowlist = cfg
+	server.cfg.Filtering.ScanAuthenticated = false
+	server.cfg.Correspondents = cfg
 	server.correspondents = newCorrespondentStore(cfg, server.log)
 	defer conn.Close()
 
@@ -524,11 +572,11 @@ func TestAuthenticatedAcceptedMessageLearnsEnvelopeRecipients(t *testing.T) {
 func TestAbortedAuthenticatedMessageDoesNotLearnRecipients(t *testing.T) {
 	analyzer := &countingAnalyzer{}
 	server, conn, _ := testServer(t, analyzer)
-	cfg := config.CorrespondentAllowlistConfig{
+	cfg := config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100,
 	}
-	server.cfg.CorrespondentAllowlist = cfg
+	server.cfg.Correspondents = cfg
 	server.correspondents = newCorrespondentStore(cfg, server.log)
 	defer conn.Close()
 
@@ -554,11 +602,11 @@ func TestAbortedAuthenticatedMessageDoesNotLearnRecipients(t *testing.T) {
 func TestKnownCorrespondentIsSuppliedAsAIEvidence(t *testing.T) {
 	analyzer := &recordingAnalyzer{inputs: make(chan ai.Input, 1)}
 	server, conn, done := testServer(t, analyzer)
-	cfg := config.CorrespondentAllowlistConfig{
+	cfg := config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100,
 	}
-	server.cfg.CorrespondentAllowlist = cfg
+	server.cfg.Correspondents = cfg
 	server.correspondents = newCorrespondentStore(cfg, server.log)
 	if err := server.correspondents.learn("philip@invades.net", []string{"alice@example.com"}); err != nil {
 		t.Fatal(err)
@@ -612,12 +660,12 @@ func TestKnownCorrespondentBypassAuthenticationPolicy(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 			server, conn, done := testServer(t, analyzer)
-			cfg := config.CorrespondentAllowlistConfig{
+			cfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: test.recipientMatch, BypassAI: true,
 				RequireDKIMForBypass: test.requireDKIM,
 				File:                 filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
 			}
-			server.cfg.CorrespondentAllowlist = cfg
+			server.cfg.Correspondents = cfg
 			server.correspondents = newCorrespondentStore(cfg, server.log)
 			if err := server.correspondents.learn("philip@invades.net", []string{"alice@example.com"}); err != nil {
 				t.Fatal(err)
@@ -665,12 +713,12 @@ func TestMTAHostnameMacroExpandsTrustedAuthenticationService(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 			server, conn, done := testServer(t, analyzer)
-			cfg := config.CorrespondentAllowlistConfig{
+			cfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 				BypassAI: true, RequireDKIMForBypass: true, File: filepath.Join(t.TempDir(), "allowlist.json"),
 				MaxEntries: 100, TrustedAuthservIDs: []string{config.MTAHostnameAuthservID},
 			}
-			server.cfg.CorrespondentAllowlist = cfg
+			server.cfg.Correspondents = cfg
 			server.correspondents = newCorrespondentStore(cfg, server.log)
 			if err := server.correspondents.learn("philip@invades.net", []string{"alice@example.com"}); err != nil {
 				t.Fatal(err)
@@ -718,12 +766,12 @@ func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 0, Reasons: []string{"test"}}}
 			server, conn, done := testServer(t, analyzer)
-			cfg := config.CorrespondentAllowlistConfig{
+			cfg := config.CorrespondentsConfig{
 				LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 				BypassAI: true, RequireDKIMForBypass: test.requireDKIM, File: filepath.Join(t.TempDir(), "allowlist.json"),
 				MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
 			}
-			server.cfg.CorrespondentAllowlist = cfg
+			server.cfg.Correspondents = cfg
 			server.correspondents = newCorrespondentStore(cfg, server.log)
 			learnedAt := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 			server.correspondents.now = func() time.Time { return learnedAt }
@@ -767,12 +815,12 @@ func TestBypassedInboundActivityRequiresTrustedDKIM(t *testing.T) {
 func TestAIResultLearnsInboundSender(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "legitimate", Score: 1, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
-	cfg := config.CorrespondentAllowlistConfig{
+	cfg := config.CorrespondentsConfig{
 		LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender", RecipientMatch: "all",
 		LegitimateSenderMinMessages: 1, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
 		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 100, TrustedAuthservIDs: []string{"nl.invades.net"},
 	}
-	server.cfg.CorrespondentAllowlist = cfg
+	server.cfg.Correspondents = cfg
 	server.correspondents = newCorrespondentStore(cfg, server.log)
 
 	negotiate(t, conn)
@@ -801,9 +849,9 @@ func TestAIResultLearnsInboundSender(t *testing.T) {
 func TestRejectedIPBypassesSecondAIAnalysis(t *testing.T) {
 	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "scam", Score: 1, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
-	server.cfg.Policy.RejectedIPBlockDuration = config.Duration(15 * time.Minute)
-	server.cfg.Policy.RejectedIPCacheSize = 100
-	server.ipReputation = newIPReputationStore(server.cfg.Policy, server.log)
+	server.cfg.IPReputation.BlockDuration = config.Duration(15 * time.Minute)
+	server.cfg.IPReputation.MaxEntries = 100
+	server.ipReputation = newIPReputationStore(server.cfg.IPReputation, server.log)
 	defer conn.Close()
 
 	negotiate(t, conn)

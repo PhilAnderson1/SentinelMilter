@@ -46,13 +46,13 @@ type correspondentMatch struct {
 
 type correspondentStore struct {
 	mu      sync.RWMutex
-	cfg     config.CorrespondentAllowlistConfig
+	cfg     config.CorrespondentsConfig
 	entries map[string]correspondentEntry
 	now     func() time.Time
 	log     *slog.Logger
 }
 
-func newCorrespondentStore(cfg config.CorrespondentAllowlistConfig, log *slog.Logger) *correspondentStore {
+func newCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logger) *correspondentStore {
 	store := &correspondentStore{cfg: cfg, entries: make(map[string]correspondentEntry), now: time.Now, log: log}
 	if !cfg.LearnAuthenticatedRecipients && !cfg.LearnLegitimateSenders && !cfg.UseAllowlist {
 		return store

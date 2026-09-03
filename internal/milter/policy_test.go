@@ -54,7 +54,7 @@ func TestApplyPolicy(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			server := &Server{cfg: config.Config{Mode: test.mode, Policy: config.PolicyConfig{RejectScore: 0.9}}}
+			server := &Server{cfg: config.Config{Mode: test.mode, Filtering: config.FilteringConfig{RejectScore: 0.9}}}
 			proposed, selected := server.applyPolicy(test.decision)
 			if proposed != test.proposed || selected != test.selected {
 				t.Fatalf("actions = (%s, %s), want (%s, %s)", proposed, selected, test.proposed, test.selected)
@@ -64,7 +64,7 @@ func TestApplyPolicy(t *testing.T) {
 }
 
 func TestEncodeAction(t *testing.T) {
-	server := &Server{cfg: config.Config{Policy: config.PolicyConfig{RejectMessage: "blocked"}}}
+	server := &Server{cfg: config.Config{Filtering: config.FilteringConfig{RejectMessage: "blocked"}}}
 	tests := []struct {
 		action action
 		want   string

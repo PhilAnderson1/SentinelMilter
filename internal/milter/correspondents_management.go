@@ -10,7 +10,7 @@ import (
 
 // AddManualCorrespondent adds an immediately qualified relationship. The
 // caller must ensure the running daemon is stopped while editing its database.
-func AddManualCorrespondent(cfg config.CorrespondentAllowlistConfig, sender, recipient string) (bool, error) {
+func AddManualCorrespondent(cfg config.CorrespondentsConfig, sender, recipient string) (bool, error) {
 	store, err := openCorrespondentStoreForManagement(cfg)
 	if err != nil {
 		return false, err
@@ -44,7 +44,7 @@ func AddManualCorrespondent(cfg config.CorrespondentAllowlistConfig, sender, rec
 
 // DeleteCorrespondents deletes an exact relationship, or every relationship
 // for sender when recipient is "*". Explicit deletion applies to all types.
-func DeleteCorrespondents(cfg config.CorrespondentAllowlistConfig, sender, recipient string) (int, error) {
+func DeleteCorrespondents(cfg config.CorrespondentsConfig, sender, recipient string) (int, error) {
 	store, err := openCorrespondentStoreForManagement(cfg)
 	if err != nil {
 		return 0, err
@@ -78,7 +78,7 @@ func DeleteCorrespondents(cfg config.CorrespondentAllowlistConfig, sender, recip
 	return removed, nil
 }
 
-func openCorrespondentStoreForManagement(cfg config.CorrespondentAllowlistConfig) (*correspondentStore, error) {
+func openCorrespondentStoreForManagement(cfg config.CorrespondentsConfig) (*correspondentStore, error) {
 	store := &correspondentStore{cfg: cfg, entries: make(map[string]correspondentEntry), now: time.Now}
 	if err := store.load(); err != nil && !os.IsNotExist(err) {
 		return nil, err

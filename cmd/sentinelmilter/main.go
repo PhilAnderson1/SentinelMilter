@@ -54,7 +54,7 @@ func main() {
 		}
 		recipient := flag.Args()[0]
 		if *whitelistAdd != "" {
-			created, err := milter.AddManualCorrespondent(cfg.CorrespondentAllowlist, *whitelistAdd, recipient)
+			created, err := milter.AddManualCorrespondent(cfg.Correspondents, *whitelistAdd, recipient)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "cannot add whitelist entry:", err)
 				os.Exit(1)
@@ -66,7 +66,7 @@ func main() {
 			fmt.Printf("whitelist entry %s: sender=%s recipient=%s\n", result, *whitelistAdd, recipient)
 			return
 		}
-		removed, err := milter.DeleteCorrespondents(cfg.CorrespondentAllowlist, *whitelistDelete, recipient)
+		removed, err := milter.DeleteCorrespondents(cfg.Correspondents, *whitelistDelete, recipient)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "cannot delete whitelist entry:", err)
 			os.Exit(1)

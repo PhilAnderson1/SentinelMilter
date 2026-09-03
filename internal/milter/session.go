@@ -243,12 +243,20 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if ss.phase != phaseBody {
 		return ss.protocolError("unexpected milter end-of-body command")
 	}
-	if ss.authentication.Authenticated && !ss.server.cfg.Policy.ScanAuthenticated {
+	if ss.authentication.Authenticated && !ss.server.cfg.Filtering.ScanAuthenticated {
 		return ss.finishBypassedMessage(ctx, "authenticated_connection", true, false)
 	}
+	if handled, keepConnection := ss.applyAttachments(ctx); handled {
+		return keepConnection
+	}
 	inbound := ss.prepareInboundEvidence()
+	if inbound.allowedSenderDomain != "" {
+		return ss.finishBypassedMessage(ctx, "sender_domain_allowlist", false, false,
+			"sender_domain", inbound.allowedSenderDomain,
+			"trusted_aligned_dkim", inbound.trustedDKIM)
+	}
 	if inbound.bypassAI {
-		return ss.finishBypassedMessage(ctx, "correspondent_allowlist", false, inbound.trustedDKIM)
+		return ss.finishBypassedMessage(ctx, "correspondents", false, inbound.trustedDKIM)
 	}
 	ss.message.Connection = ss.connectionInformation(ctx)
 	_ = ss.conn.SetDeadline(time.Now().Add(ss.server.analysisTimeout()))
@@ -264,9 +272,10 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 }
 
 type inboundEvidence struct {
-	recipientsComplete bool
-	trustedDKIM        bool
-	bypassAI           bool
+	recipientsComplete  bool
+	trustedDKIM         bool
+	bypassAI            bool
+	allowedSenderDomain string
 }
 
 func (ss *session) prepareInboundEvidence() inboundEvidence {
@@ -276,22 +285,26 @@ func (ss *session) prepareInboundEvidence() inboundEvidence {
 	}
 	authentication := trustedSenderAuthentication(ss.message, ss.trustedAuthservIDs(), ss.message.Header("From"))
 	evidence.trustedDKIM = authentication.DKIMAligned
-	if !ss.server.cfg.CorrespondentAllowlist.UseAllowlist {
+	if domain := allowedSenderDomain(ss.message.Header("From"), ss.server.cfg.Filtering.SenderDomainAllowlist); domain != "" &&
+		(!ss.server.cfg.Filtering.SenderDomainAllowlistRequireDKIM || authentication.DKIMAligned) {
+		evidence.allowedSenderDomain = domain
+	}
+	if !ss.server.cfg.Correspondents.UseAllowlist {
 		return evidence
 	}
 	match := ss.server.correspondents.match(ss.message.Header("From"), ss.envelopeRecipients)
 	known := match.Known
-	if ss.server.cfg.CorrespondentAllowlist.Scope == "per_sender" && ss.server.cfg.CorrespondentAllowlist.RecipientMatch == "all" {
+	if ss.server.cfg.Correspondents.Scope == "per_sender" && ss.server.cfg.Correspondents.RecipientMatch == "all" {
 		known = evidence.recipientsComplete && match.AllRecipientsMatched
 	}
 	ss.message.Correspondent = message.CorrespondentInfo{
 		Enabled:               true,
 		Known:                 known,
-		Scope:                 ss.server.cfg.CorrespondentAllowlist.Scope,
+		Scope:                 ss.server.cfg.Correspondents.Scope,
 		AuthenticationAligned: known && authentication.anyAligned(),
 	}
-	bypassAuthentication := !ss.server.cfg.CorrespondentAllowlist.RequireDKIMForBypass || authentication.DKIMAligned
-	evidence.bypassAI = ss.server.cfg.CorrespondentAllowlist.BypassAI && evidence.recipientsComplete && known && bypassAuthentication
+	bypassAuthentication := !ss.server.cfg.Correspondents.RequireDKIMForBypass || authentication.DKIMAligned
+	evidence.bypassAI = ss.server.cfg.Correspondents.BypassAI && evidence.recipientsComplete && known && bypassAuthentication
 	return evidence
 }
 
@@ -324,7 +337,7 @@ func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluati
 func (ss *session) recordInboundClassification(ctx context.Context, result evaluationResult, recipientsComplete, dkimAligned bool) {
 	if err := ss.server.correspondents.recordInboundClassification(
 		ss.message.Header("From"), ss.envelopeRecipients, recipientsComplete,
-		result.classification, result.score, ss.server.cfg.Policy.RejectScore, dkimAligned,
+		result.classification, result.score, ss.server.cfg.Filtering.RejectScore, dkimAligned,
 	); err != nil {
 		ss.server.log.ErrorContext(ctx, "cannot update inbound correspondent learning", "error", err)
 	}
@@ -354,7 +367,7 @@ func (ss *session) captureSessionMacros(payload []byte) {
 }
 
 func (ss *session) trustedAuthservIDs() []string {
-	configured := ss.server.cfg.CorrespondentAllowlist.TrustedAuthservIDs
+	configured := ss.server.cfg.Correspondents.TrustedAuthservIDs
 	trusted := make([]string, 0, len(configured))
 	for _, authservID := range configured {
 		if authservID == config.MTAHostnameAuthservID {
@@ -389,7 +402,7 @@ func validMTAHostname(value string) string {
 	return value
 }
 
-func (ss *session) finishBypassedMessage(ctx context.Context, source string, learn, touchInbound bool) bool {
+func (ss *session) finishBypassedMessage(ctx context.Context, source string, learn, touchInbound bool, extraAttrs ...any) bool {
 	err := writeFrame(ss.conn, ss.server.encodeAction(actionAccept))
 	attrs := []any{
 		"message_id", ss.message.Header("Message-ID"),
@@ -398,6 +411,7 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 		"source", source,
 		"response_sent", err == nil,
 	}
+	attrs = append(attrs, extraAttrs...)
 	if err != nil {
 		attrs = append(attrs, "response_error", err)
 		ss.server.log.ErrorContext(ctx, "message bypass response failed", attrs...)

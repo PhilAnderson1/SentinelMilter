@@ -13,7 +13,7 @@ import (
 
 func TestCorrespondentStorePersistsPerSenderRelationships(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "allowlist.json")
-	cfg := config.CorrespondentAllowlistConfig{
+	cfg := config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true,
 		UseAllowlist:                 true,
 		Scope:                        "per_sender",
@@ -53,7 +53,7 @@ func TestCorrespondentStoreMigratesLegacyEntries(t *testing.T) {
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.CorrespondentAllowlistConfig{
+	cfg := config.CorrespondentsConfig{
 		UseAllowlist: true, Scope: "per_sender", LegitimateSenderMinMessages: 5,
 		File: path, MaxEntries: 10,
 	}
@@ -73,7 +73,7 @@ func TestCorrespondentStoreMigratesLegacyEntries(t *testing.T) {
 
 func TestCorrespondentStoreScopeChangesOnlyMatching(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "allowlist.json")
-	globalConfig := config.CorrespondentAllowlistConfig{
+	globalConfig := config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true,
 		UseAllowlist:                 true,
 		Scope:                        "global",
@@ -100,7 +100,7 @@ func TestCorrespondentStoreScopeChangesOnlyMatching(t *testing.T) {
 }
 
 func TestCorrespondentStoreEvictsOldestAtCapacity(t *testing.T) {
-	store := newCorrespondentStore(config.CorrespondentAllowlistConfig{
+	store := newCorrespondentStore(config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true,
 		UseAllowlist:                 true,
 		Scope:                        "global",
@@ -122,7 +122,7 @@ func TestCorrespondentStoreEvictsOldestAtCapacity(t *testing.T) {
 }
 
 func TestCorrespondentStoreEvictsLeastRecentlyActive(t *testing.T) {
-	store := newCorrespondentStore(config.CorrespondentAllowlistConfig{
+	store := newCorrespondentStore(config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "global",
 		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 2,
 	}, slog.Default())
@@ -150,7 +150,7 @@ func TestCorrespondentStoreEvictsLeastRecentlyActive(t *testing.T) {
 
 func TestCorrespondentStoreRemovesStaleRelationships(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "allowlist.json")
-	store := newCorrespondentStore(config.CorrespondentAllowlistConfig{
+	store := newCorrespondentStore(config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "global",
 		File: path, MaxEntries: 10, StaleAfter: config.Duration(24 * time.Hour),
 	}, slog.Default())
@@ -170,7 +170,7 @@ func TestCorrespondentStoreRemovesStaleRelationships(t *testing.T) {
 
 func TestCorrespondentActivityPersistenceIsThrottled(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "allowlist.json")
-	store := newCorrespondentStore(config.CorrespondentAllowlistConfig{
+	store := newCorrespondentStore(config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, UseAllowlist: true, Scope: "per_sender",
 		File: path, MaxEntries: 10, ActivityUpdateInterval: config.Duration(24 * time.Hour),
 	}, slog.Default())
@@ -198,7 +198,7 @@ func TestCorrespondentActivityPersistenceIsThrottled(t *testing.T) {
 
 func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "allowlist.json")
-	cfg := config.CorrespondentAllowlistConfig{
+	cfg := config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true, UseAllowlist: true,
 		Scope: "per_sender", LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .99,
 		LegitimateSenderRequireDKIM: true, File: path, MaxEntries: 10,
@@ -253,7 +253,7 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 }
 
 func TestCorrespondentCapacityEvictsCandidateBeforeQualifiedEntry(t *testing.T) {
-	store := newCorrespondentStore(config.CorrespondentAllowlistConfig{
+	store := newCorrespondentStore(config.CorrespondentsConfig{
 		LearnAuthenticatedRecipients: true, LearnLegitimateSenders: true, UseAllowlist: true,
 		Scope: "per_sender", LegitimateSenderMinMessages: 3, LegitimateSenderMinScore: .99,
 		File: filepath.Join(t.TempDir(), "allowlist.json"), MaxEntries: 2,
@@ -277,7 +277,7 @@ func TestCorrespondentCapacityEvictsCandidateBeforeQualifiedEntry(t *testing.T) 
 
 func TestManualCorrespondentManagement(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "allowlist.json")
-	cfg := config.CorrespondentAllowlistConfig{
+	cfg := config.CorrespondentsConfig{
 		UseAllowlist: true, Scope: "per_sender", LegitimateSenderMinMessages: 5,
 		File: path, MaxEntries: 10,
 	}
@@ -315,7 +315,7 @@ func TestManualCorrespondentManagement(t *testing.T) {
 
 func TestManualCorrespondentOverridesInboundCandidate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "allowlist.json")
-	cfg := config.CorrespondentAllowlistConfig{
+	cfg := config.CorrespondentsConfig{
 		LearnLegitimateSenders: true, UseAllowlist: true, Scope: "per_sender",
 		LegitimateSenderMinMessages: 5, LegitimateSenderMinScore: .99,
 		File: path, MaxEntries: 10,
