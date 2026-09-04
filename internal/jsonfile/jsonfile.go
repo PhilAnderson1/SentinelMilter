@@ -1,5 +1,5 @@
 // Package jsonfile provides strict, size-bounded JSON reads and durable atomic
-// complete-file replacement for SentinelMilter's small persistent stores.
+// complete-file replacement for MilterGuard's small persistent stores.
 package jsonfile
 
 import (
@@ -52,7 +52,7 @@ func Write(path string, value any, directoryMode, fileMode os.FileMode) error {
 	if err := os.MkdirAll(directory, directoryMode); err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(directory, ".sentinelmilter-json-*")
+	temporary, err := os.CreateTemp(directory, ".milterguard-json-*")
 	if err != nil {
 		return err
 	}

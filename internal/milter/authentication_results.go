@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 	"golang.org/x/net/publicsuffix"
 )
 

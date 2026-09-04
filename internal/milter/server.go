@@ -2,15 +2,17 @@ package milter
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"log/slog"
 	"net"
 	"sync"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/ai"
-	"github.com/PhilAnderson1/SentinelMilter/internal/attachment"
-	"github.com/PhilAnderson1/SentinelMilter/internal/config"
-	"github.com/PhilAnderson1/SentinelMilter/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/ai"
+	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
 const analysisResponseMargin = 5 * time.Second
@@ -31,20 +33,25 @@ type evaluationResult struct {
 }
 
 type Server struct {
-	cfg            config.Config
-	analyzer       Analyzer
-	log            *slog.Logger
-	slots          chan struct{}
-	ipReputation   *ipReputationStore
-	correspondents *correspondentStore
-	resolver       dnsResolver
-	attachments    *attachment.Scanner
-	wg             sync.WaitGroup
+	cfg              config.Config
+	analyzer         Analyzer
+	log              *slog.Logger
+	slots            chan struct{}
+	ipReputation     *ipReputationStore
+	correspondents   *correspondentStore
+	rejectionHistory *rejectionHistoryStore
+	resolver         dnsResolver
+	attachments      *attachment.Scanner
+	internalToken    string
+	replySlots       chan struct{}
+	wg               sync.WaitGroup
 }
 
 func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
-	server := &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent), ipReputation: newIPReputationStore(cfg.IPReputation, log), correspondents: newCorrespondentStore(cfg.Correspondents, log), resolver: net.DefaultResolver}
-	if cfg.Attachments.Block {
+	var tokenBytes [32]byte
+	_, _ = rand.Read(tokenBytes[:])
+	server := &Server{cfg: cfg, analyzer: analyzer, log: log, slots: make(chan struct{}, cfg.AI.MaxConcurrent), ipReputation: newIPReputationStore(cfg.IPReputation, log), correspondents: newCorrespondentStore(cfg.Correspondents, log), rejectionHistory: newRejectionHistoryStore(cfg.RejectionHistory, log), resolver: net.DefaultResolver, internalToken: hex.EncodeToString(tokenBytes[:]), replySlots: make(chan struct{}, 4)}
+	if cfg.Attachments.BlockExecutables {
 		server.attachments = attachment.New(attachment.Options{
 			BlockedExtensions: cfg.Attachments.BlockedExtensions, InspectSignatures: cfg.Attachments.InspectSignatures,
 			InspectArchives: cfg.Attachments.InspectArchives, MaxAttachmentBytes: cfg.Attachments.MaxAttachmentBytes,
@@ -56,6 +63,29 @@ func NewServer(cfg config.Config, analyzer Analyzer, log *slog.Logger) *Server {
 }
 
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	if flushInterval := s.cfg.Persistence.FlushInterval.Value(); flushInterval > 0 {
+		s.enableDeferredPersistence()
+		flushCtx, stopFlush := context.WithCancel(ctx)
+		flushDone := make(chan struct{})
+		go func() {
+			defer close(flushDone)
+			ticker := time.NewTicker(flushInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					s.flushPersistentState()
+				case <-flushCtx.Done():
+					return
+				}
+			}
+		}()
+		defer func() {
+			stopFlush()
+			<-flushDone
+			s.flushPersistentState()
+		}()
+	}
 	go func() { <-ctx.Done(); _ = ln.Close() }()
 	for {
 		conn, err := ln.Accept()
@@ -72,6 +102,24 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			defer conn.Close()
 			newSession(s, conn).run(ctx)
 		}()
+	}
+}
+
+func (s *Server) enableDeferredPersistence() {
+	s.ipReputation.enableDeferredPersistence()
+	s.correspondents.enableDeferredPersistence()
+	s.rejectionHistory.enableDeferredPersistence()
+}
+
+func (s *Server) flushPersistentState() {
+	if err := s.ipReputation.flush(); err != nil {
+		s.log.Error("cannot flush rejected IP state", "error", err)
+	}
+	if err := s.correspondents.flush(); err != nil {
+		s.log.Error("cannot flush correspondent allowlist", "error", err)
+	}
+	if err := s.rejectionHistory.flush(); err != nil {
+		s.log.Error("cannot flush rejection history", "error", err)
 	}
 }
 

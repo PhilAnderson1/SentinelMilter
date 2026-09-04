@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
 )
 
 func TestCorrespondentStorePersistsPerSenderRelationships(t *testing.T) {
@@ -345,6 +345,43 @@ func readCorrespondentFile(t *testing.T, path string) correspondentFile {
 		t.Fatal(err)
 	}
 	return data
+}
+
+func TestListAllowlistIsRecipientScopedAndQualifiedOnly(t *testing.T) {
+	cfg := config.CorrespondentsConfig{UseAllowlist: true, Scope: "per_sender", File: filepath.Join(t.TempDir(), "correspondents.json"), MaxEntries: 10, LegitimateSenderMinMessages: 3}
+	store := newCorrespondentStore(cfg, nil)
+	if _, err := store.addManual("z@example.net", "bob@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.addManual("a@example.net", "alice@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.entries[store.key("alice@example.com", "candidate@example.net")] = correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "candidate@example.net", WhitelistType: whitelistRepeatedLegitimate, LegitimateEmailCount: 1}
+	store.mu.Unlock()
+	alice := store.listAllowlist("alice@example.com")
+	if len(alice) != 1 || alice[0].Correspondent != "a@example.net" {
+		t.Fatalf("Alice allowlist = %#v", alice)
+	}
+	all := store.listAllowlist("*")
+	if len(all) != 2 || all[0].LocalAddress != "alice@example.com" || all[1].LocalAddress != "bob@example.com" {
+		t.Fatalf("global allowlist = %#v", all)
+	}
+}
+
+func TestListAllowlistIsMostRecentlyActiveFirst(t *testing.T) {
+	cfg := config.CorrespondentsConfig{UseAllowlist: true, Scope: "per_sender", File: filepath.Join(t.TempDir(), "correspondents.json"), MaxEntries: 10}
+	store := newCorrespondentStore(cfg, nil)
+	older := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(time.Hour)
+	store.mu.Lock()
+	store.entries[store.key("alice@example.com", "older@example.net")] = correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "older@example.net", WhitelistType: whitelistManual, LearnedAt: older, LastActivityAt: older}
+	store.entries[store.key("alice@example.com", "newer@example.net")] = correspondentEntry{LocalAddress: "alice@example.com", Correspondent: "newer@example.net", WhitelistType: whitelistManual, LearnedAt: newer, LastActivityAt: newer}
+	store.mu.Unlock()
+	got := store.listAllowlist("alice@example.com")
+	if len(got) != 2 || got[0].Correspondent != "newer@example.net" || got[1].Correspondent != "older@example.net" {
+		t.Fatalf("allowlist order = %#v", got)
+	}
 }
 
 func fileMode(t *testing.T, path string) os.FileMode {

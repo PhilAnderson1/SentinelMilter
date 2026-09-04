@@ -1,10 +1,12 @@
-# SentinelMilter
+# MilterGuard
 
-[![CI](https://github.com/PhilAnderson1/SentinelMilter/actions/workflows/ci.yml/badge.svg)](https://github.com/PhilAnderson1/SentinelMilter/actions/workflows/ci.yml)
+[![CI](https://github.com/PhilAnderson1/MilterGuard/actions/workflows/ci.yml/badge.svg)](https://github.com/PhilAnderson1/MilterGuard/actions/workflows/ci.yml)
 
-SentinelMilter is an AI-powered mail filter for identifying and rejecting unwanted email. It has been tested with Postfix but is designed to work with any MTA that supports the Sendmail Milter protocol.
+MilterGuard is an AI-powered mail filter for identifying and rejecting unwanted email. It has been tested with Postfix but is designed to work with any MTA that supports the Sendmail Milter protocol.
 
-## Why SentinelMilter?
+[Quick start](QUICKSTART.md) · [Operating guide](OPERATING_GUIDE.md)
+
+## Why MilterGuard?
 
 - Uses semantic analysis to detect unwanted email by meaning, not just keywords or signatures.
 - Performs forensic AI analysis of message headers, body content, and hyperlink destinations.
@@ -12,17 +14,19 @@ SentinelMilter is an AI-powered mail filter for identifying and rejecting unwant
 - Blocks executable attachments, including files disguised or concealed inside compressed archives.
 - Smart correspondent allowlisting learns trusted relationships and recurring legitimate senders, reducing false positives and unnecessary AI scans.
 - Automatically builds persistent IP reputation to block repeat offenders without repeated AI analysis.
+- Manage allowlists and review rejected mail securely by email.
 - Can scan inbound and outbound email, helping protect your server's sending reputation.
-- Installs easily as a single, statically linked binary with no runtime dependencies.
+- The core service installs as a single, statically linked binary with no runtime dependencies; the optional mailbox replay tool requires Python 3.
 - Provides a safe monitor mode that logs classifications and proposed actions without blocking email.
 - Cost-effective to operate at approximately $0.35 per 1,000 scanned emails with the suggested LLM, depending on message length and provider pricing.
 - Avoids provider lock-in by supporting compatible hosted AI services and locally hosted AI models.
+- Includes install and uninstall scripts for painless installation and removal.
 
-SentinelMilter works with OpenRouter and llama.cpp-style `v1/chat/completions` AI endpoints.
+MilterGuard works with OpenRouter and llama.cpp-style `v1/chat/completions` AI endpoints.
 
 ## Install
 
-Download the archive for your system from the [latest SentinelMilter release](https://github.com/PhilAnderson1/SentinelMilter/releases/latest):
+Download the archive for your system from the [latest MilterGuard release](https://github.com/PhilAnderson1/MilterGuard/releases/latest):
 
 | Linux architecture | Release archive suffix |
 | --- | --- |
@@ -34,18 +38,18 @@ Download the archive for your system from the [latest SentinelMilter release](ht
 Extract the downloaded archive and run its installer. For example, for an AMD64 system:
 
 ```sh
-tar -xzf sentinelmilter-v0.1.0-linux-amd64.tar.gz
-cd sentinelmilter-v0.1.0
+tar -xzf milterguard-v0.2.0-linux-amd64.tar.gz
+cd milterguard-v0.2.0-linux-amd64
 sudo ./install.sh
 ```
 
-The release binaries are statically linked. The installer places the executable in `/usr/local/sbin`, installs the configuration files in `/etc/sentinelmilter`, and installs the systemd unit when systemd is available. Existing configuration files are preserved.
+The release binaries are statically linked. The installer places the executable in `/usr/local/sbin`, installs the configuration files in `/etc/milterguard`, installs documentation and the optional mailbox replay tool in `/usr/local/share/milterguard`, and installs the systemd unit when systemd is available. Existing configuration files are preserved.
 
 ### Configuration
 
-Edit `/etc/sentinelmilter/sentinelmilter.yaml` before starting the service. To use a hosted AI model, get an API key from [OpenRouter](https://openrouter.ai/), then add the key to the `ai` section - if the example model is no longer available, select a current compatible model and adjust the prompt or settings if necessary. Alternatively, change the endpoint and model to use a locally operated llama.cpp `v1/chat/completions` server. An API key can be stored in `ai.api_key` or supplied through the environment variable named by `ai.api_key_env`.
+Edit `/etc/milterguard/milterguard.yaml` before starting the service. To use a hosted AI model, get an API key from [OpenRouter](https://openrouter.ai/), then add the key to the `ai` section - if the example model is no longer available, select a current compatible model and adjust the prompt or settings if necessary. Alternatively, change the endpoint and model to use a locally operated llama.cpp `v1/chat/completions` server. An API key can be stored in `ai.api_key` or supplied through the environment variable named by `ai.api_key_env`.
 
-Leave SentinelMilter in `monitor` mode initially so that it records classifications and proposed actions without rejecting messages.
+Leave MilterGuard in `monitor` mode initially so that it records classifications and proposed actions without rejecting messages.
 
 For Postfix, add the following to `main.cf` (ensure Postfix's milter content timeout remains above the AI timeout):
 
@@ -56,15 +60,15 @@ milter_default_action = accept
 milter_protocol = 6
 ```
 
-SentinelMilter uses DKIM, SPF and DMARC results supplied by earlier mail filters as evidence. List authentication Milters before SentinelMilter in your Postfix configuration to improve classification accuracy.
+MilterGuard uses DKIM, SPF and DMARC results supplied by earlier mail filters as evidence. List authentication Milters before MilterGuard in your Postfix configuration to improve classification accuracy.
 
 Keep TCP listeners bound to a loopback address unless access is restricted separately.
 
 Validate the configuration before enabling the service:
 
 ```sh
-sudo /usr/local/sbin/sentinelmilter --config /etc/sentinelmilter/sentinelmilter.yaml --check-config
-sudo systemctl enable --now sentinelmilter
+sudo /usr/local/sbin/milterguard --config /etc/milterguard/milterguard.yaml --check-config
+sudo systemctl enable --now milterguard
 ```
 
 Reload Postfix after changing `main.cf`:
@@ -73,52 +77,40 @@ Reload Postfix after changing `main.cf`:
 sudo postfix reload
 ```
 
-Send representative legitimate and unwanted test messages, then monitor SentinelMilter's classifications, scores, reasons, proposed actions, and actual actions:
+Send representative legitimate and unwanted test messages, then monitor MilterGuard's classifications, scores, reasons, proposed actions, and actual actions:
 
 ```sh
-sudo journalctl -u sentinelmilter --since yesterday --no-pager -o cat
+sudo journalctl -u milterguard --since yesterday --no-pager -o cat
 ```
 
-Once monitor-mode results are satisfactory, change `mode: monitor` to `mode: enforce` in `/etc/sentinelmilter/sentinelmilter.yaml` and restart SentinelMilter:
+Once monitor-mode results are satisfactory, change `mode: monitor` to `mode: enforce` in `/etc/milterguard/milterguard.yaml` and restart MilterGuard:
 
 ```sh
-sudo systemctl restart sentinelmilter
+sudo systemctl restart milterguard
 ```
-
-To add or remove correspondent whitelist entries manually, stop SentinelMilter while editing its database:
-
-```sh
-sudo systemctl stop sentinelmilter
-sudo sentinelmilter --whitelist-add sender@example.com recipient@example.net
-sudo sentinelmilter --whitelist-del sender@example.com recipient@example.net
-sudo sentinelmilter --whitelist-del sender@example.com '*'
-sudo systemctl start sentinelmilter
-```
-
-The wildcard deletes that sender's entries for every local recipient.
 
 ## Build from source
 
-If a prebuilt binary is not suitable for your system, build SentinelMilter with Go 1.22 or later:
+If a prebuilt binary is not suitable for your system, build MilterGuard with Go 1.22 or later:
 
 ```sh
-git clone https://github.com/PhilAnderson1/SentinelMilter.git
-cd SentinelMilter
+git clone https://github.com/PhilAnderson1/MilterGuard.git
+cd MilterGuard
 go test ./...
-CGO_ENABLED=0 go build -trimpath -o sentinelmilter ./cmd/sentinelmilter
+CGO_ENABLED=0 go build -trimpath -o milterguard ./cmd/milterguard
 ```
 
 Install the resulting binary, configuration, prompt, and systemd unit:
 
 ```sh
-sudo install -m 0755 sentinelmilter /usr/local/sbin/sentinelmilter
-getent group sentinelmilter >/dev/null || sudo groupadd --system sentinelmilter
-id sentinelmilter >/dev/null 2>&1 || sudo useradd --system --gid sentinelmilter --home-dir /nonexistent --shell /usr/sbin/nologin sentinelmilter
-sudo install -d -o root -g sentinelmilter -m 0750 /etc/sentinelmilter
-sudo install -d -o sentinelmilter -g sentinelmilter -m 0750 /var/lib/sentinelmilter
-sudo install -o root -g sentinelmilter -m 0640 configs/sentinelmilter.yaml /etc/sentinelmilter/
-sudo install -o root -g sentinelmilter -m 0640 configs/detection-prompt.txt /etc/sentinelmilter/
-sudo install -m 0644 packaging/systemd/sentinelmilter.service /etc/systemd/system/
+sudo install -m 0755 milterguard /usr/local/sbin/milterguard
+getent group milterguard >/dev/null || sudo groupadd --system milterguard
+id milterguard >/dev/null 2>&1 || sudo useradd --system --gid milterguard --home-dir /nonexistent --shell /usr/sbin/nologin milterguard
+sudo install -d -o root -g milterguard -m 0750 /etc/milterguard
+sudo install -d -o milterguard -g milterguard -m 0750 /var/lib/milterguard
+sudo install -o root -g milterguard -m 0640 configs/milterguard.yaml /etc/milterguard/
+sudo install -o root -g milterguard -m 0640 configs/detection-prompt.txt /etc/milterguard/
+sudo install -m 0644 packaging/systemd/milterguard.service /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
 
@@ -126,4 +118,4 @@ Then edit and validate the configuration as described in the installation sectio
 
 ## License
 
-SentinelMilter is available under the [MIT License](LICENSE).
+MilterGuard is available under the [MIT License](LICENSE).

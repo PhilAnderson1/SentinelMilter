@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
 type connectionTestResolver struct {

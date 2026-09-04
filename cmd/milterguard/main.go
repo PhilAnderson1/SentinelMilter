@@ -14,13 +14,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/ai"
-	"github.com/PhilAnderson1/SentinelMilter/internal/config"
-	"github.com/PhilAnderson1/SentinelMilter/internal/milter"
+	"github.com/PhilAnderson1/MilterGuard/internal/ai"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/milter"
 )
 
 func main() {
-	configPath := flag.String("config", "/etc/sentinelmilter/sentinelmilter.yaml", "configuration file")
+	configPath := flag.String("config", "/etc/milterguard/milterguard.yaml", "configuration file")
 	check := flag.Bool("check-config", false, "validate configuration and exit")
 	whitelistAdd := flag.String("whitelist-add", "", "manually whitelist sender for one recipient (service must be stopped)")
 	whitelistDelete := flag.String("whitelist-del", "", "delete sender whitelist entry; recipient may be * (service must be stopped)")
@@ -49,7 +49,7 @@ func main() {
 			os.Exit(2)
 		}
 		if milterListenerActive(cfg.Milter.Socket) {
-			fmt.Fprintln(os.Stderr, "SentinelMilter appears to be running; stop it before modifying the whitelist")
+			fmt.Fprintln(os.Stderr, "MilterGuard appears to be running; stop it before modifying the whitelist")
 			os.Exit(1)
 		}
 		recipient := flag.Args()[0]
@@ -97,7 +97,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	server := milter.NewServer(cfg, client, logger)
-	logger.Info("SentinelMilter started", "socket", cfg.Milter.Socket, "mode", cfg.Mode)
+	logger.Info("MilterGuard started", "socket", cfg.Milter.Socket, "mode", cfg.Mode)
 	if err := server.Serve(ctx, ln); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("milter server stopped", "error", err)
 		os.Exit(1)

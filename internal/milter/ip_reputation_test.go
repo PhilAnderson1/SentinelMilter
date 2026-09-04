@@ -2,14 +2,15 @@ package milter
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/config"
-	"github.com/PhilAnderson1/SentinelMilter/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
 func TestRejectedIPCacheExpiresEntries(t *testing.T) {
@@ -396,5 +397,59 @@ func TestRejectedIPCacheLegitimateDecayDoesNotCancelActiveBlock(t *testing.T) {
 	entry, ok := cache.lookup(addr)
 	if !ok || entry.level != rejectedIPBlockShort || entry.strikeCount != 0 {
 		t.Fatalf("legitimate decay cancelled an active block: %+v, found=%v", entry, ok)
+	}
+}
+
+func TestManualIPManagementListsOnlyActiveBlocks(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	stateFile := t.TempDir() + "/state.json"
+	policy := config.IPReputationConfig{BlockDuration: config.Duration(time.Minute), RepeatThreshold: 3, RepeatWindow: config.Duration(time.Hour), RepeatBlockDuration: config.Duration(24 * time.Hour), MaxEntries: 10, StateFile: stateFile}
+	cache := newIPReputationStore(policy, nil)
+	cache.now = func() time.Time { return now }
+	manual := netip.MustParseAddr("192.0.2.80")
+	block, err := cache.manualAdd(manual)
+	if err != nil || block.Level != rejectedIPBlockRepeat || !block.ExpiresAt.Equal(now.Add(24*time.Hour)) {
+		t.Fatalf("manual block = %+v, %v", block, err)
+	}
+	cache.add(netip.MustParseAddr("192.0.2.81"), "spam", 1, connectionDNSResult{})
+	if got := cache.listActive(); len(got) != 2 {
+		t.Fatalf("active blocks = %#v", got)
+	}
+	now = now.Add(2 * time.Minute)
+	got := cache.listActive()
+	if len(got) != 1 || got[0].IP != manual.String() {
+		t.Fatalf("expired short block was listed: %#v", got)
+	}
+	removed, err := cache.manualDelete(manual)
+	if err != nil || !removed || len(cache.listActive()) != 0 {
+		t.Fatalf("manual delete = %v, %v", removed, err)
+	}
+	reloaded := newIPReputationStore(policy, nil)
+	if len(reloaded.listActive()) != 0 {
+		t.Fatal("manual deletion was not persisted")
+	}
+}
+
+func TestActiveIPListAddsReverseDNSHostname(t *testing.T) {
+	server := &Server{
+		cfg:      config.Config{Milter: config.MilterConfig{ConnectionDNSTimeout: config.Duration(time.Second)}},
+		resolver: &connectionTestResolver{ptr: []string{"dns.google."}},
+	}
+	entries := server.resolveActiveIPHostnames(context.Background(), []activeIPBlock{{IP: "8.8.8.8"}, {IP: "192.0.2.1"}})
+	if entries[0].Hostname != "dns.google" {
+		t.Fatalf("resolved hostname = %q", entries[0].Hostname)
+	}
+	if entries[1].Hostname != "" {
+		t.Fatalf("non-routable hostname = %q", entries[1].Hostname)
+	}
+	formatted := formatActiveIPBlocks(entries, true)
+	for _, want := range []string{"IP: 8.8.8.8 (dns.google)", "IP: 192.0.2.1 (not found)"} {
+		if !strings.Contains(formatted, want) {
+			t.Errorf("formatted list missing %q: %s", want, formatted)
+		}
+	}
+	withoutLookup := formatActiveIPBlocks(entries, false)
+	if strings.Contains(withoutLookup, "dns.google") || strings.Contains(withoutLookup, "not found") {
+		t.Fatalf("ordinary IP list included DNS results: %s", withoutLookup)
 	}
 }

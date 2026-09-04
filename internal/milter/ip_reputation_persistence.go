@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/jsonfile"
+	"github.com/PhilAnderson1/MilterGuard/internal/jsonfile"
 )
 
 func (s *ipReputationStore) load() error {
@@ -56,6 +56,14 @@ func (s *ipReputationStore) saveOrLogLocked() {
 }
 
 func (s *ipReputationStore) saveLocked() error {
+	if s.deferWrites {
+		s.dirty = true
+		return nil
+	}
+	return s.writeLocked()
+}
+
+func (s *ipReputationStore) writeLocked() error {
 	if s.stateFile == "" {
 		return nil
 	}
@@ -65,4 +73,29 @@ func (s *ipReputationStore) saveLocked() error {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].IP < entries[j].IP })
 	return jsonfile.Write(s.stateFile, rejectedIPFile{Version: rejectedIPFileVersion, Entries: entries}, 0750, 0640)
+}
+
+func (s *ipReputationStore) enableDeferredPersistence() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.deferWrites = true
+	s.mu.Unlock()
+}
+
+func (s *ipReputationStore) flush() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.dirty {
+		return nil
+	}
+	if err := s.writeLocked(); err != nil {
+		return err
+	}
+	s.dirty = false
+	return nil
 }

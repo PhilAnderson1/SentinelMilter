@@ -78,6 +78,7 @@ var retainedHeaders = map[string]bool{
 	"date":                      true,
 	"from":                      true,
 	"message-id":                true,
+	"x-milterguard-internal":    true,
 	"received-spf":              true,
 	"reply-to":                  true,
 	"return-path":               true,
@@ -123,4 +124,14 @@ func (m *Message) AddBody(p []byte) {
 }
 func (m *Message) Header(name string) string {
 	return strings.Join(m.Headers[strings.ToLower(name)], ", ")
+}
+
+// RetainedBytes reports the bounded header and body bytes kept by the Milter.
+func (m *Message) RetainedBytes() int64 { return m.headerSize + m.bodySize }
+
+// CommandText returns decoded visible MIME text for the authenticated command
+// mailbox. Callers separately constrain the accepted top-level MIME types.
+func (m *Message) CommandText() string {
+	content := extractMIME(m.Header("Content-Type"), m.Header("Content-Transfer-Encoding"), "", []byte(m.Body.String()), 0)
+	return strings.ToValidUTF8(content.VisibleText, "�")
 }

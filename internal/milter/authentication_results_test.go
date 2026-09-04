@@ -3,7 +3,7 @@ package milter
 import (
 	"testing"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
 func TestTrustedSenderAuthenticationAlignment(t *testing.T) {

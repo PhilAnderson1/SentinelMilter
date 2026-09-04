@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/ai"
-	"github.com/PhilAnderson1/SentinelMilter/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/ai"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
 )
 
 func TestMalformedOptionNegotiationClosesConnection(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
 )
 
 func TestValidate(t *testing.T) {
@@ -24,40 +24,73 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-func TestDisableThinkingRequestFields(t *testing.T) {
-	var body map[string]any
-	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Error(err)
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"classification\":\"legitimate\",\"score\":0,\"reasons\":[]}"}}]}`)),
-		}, nil
-	})
-
-	client := NewClient(config.AIConfig{
-		Endpoint:        "http://llama.invalid/v1/chat/completions",
-		APIKey:          "test-key",
-		Model:           "qwen",
-		DisableThinking: true,
-		Timeout:         config.Duration(time.Second),
-	}, "classify")
-	client.http.Transport = transport
-	if _, err := client.Analyze(context.Background(), Input{Text: "test message"}); err != nil {
-		t.Fatal(err)
+func TestDisableThinkingUsesEndpointSpecificRequestField(t *testing.T) {
+	tests := []struct {
+		endpointType string
+		assert       func(*testing.T, map[string]any)
+	}{
+		{
+			endpointType: "openrouter",
+			assert: func(t *testing.T, body map[string]any) {
+				reasoning, ok := body["reasoning"].(map[string]any)
+				if !ok || reasoning["enabled"] != false {
+					t.Fatalf("OpenRouter reasoning control missing: %#v", body)
+				}
+			},
+		},
+		{
+			endpointType: "llamacpp",
+			assert: func(t *testing.T, body map[string]any) {
+				if body["reasoning_effort"] != "none" {
+					t.Fatalf("llama.cpp reasoning control missing: %#v", body)
+				}
+			},
+		},
+		{
+			endpointType: "openai",
+			assert: func(t *testing.T, body map[string]any) {
+				if body["reasoning_effort"] != "none" {
+					t.Fatalf("OpenAI reasoning control missing: %#v", body)
+				}
+			},
+		},
 	}
-	if body["thinking_budget_tokens"] != float64(0) {
-		t.Fatalf("thinking budget missing: %#v", body)
-	}
-	reasoning, ok := body["reasoning"].(map[string]any)
-	if !ok || reasoning["effort"] != "none" {
-		t.Fatalf("OpenRouter reasoning control missing: %#v", body)
-	}
-	chatTemplate, ok := body["chat_template_kwargs"].(map[string]any)
-	if !ok || chatTemplate["enable_thinking"] != false {
-		t.Fatalf("llama.cpp chat template control missing: %#v", body)
+	for _, test := range tests {
+		t.Run(test.endpointType, func(t *testing.T) {
+			var body map[string]any
+			transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"classification\":\"legitimate\",\"score\":0,\"reasons\":[]}"}}]}`)),
+				}, nil
+			})
+			client := NewClient(config.AIConfig{
+				Endpoint:        "http://endpoint.invalid/v1/chat/completions",
+				EndpointType:    test.endpointType,
+				APIKey:          "test-key",
+				Model:           "test-model",
+				DisableThinking: true,
+				Timeout:         config.Duration(time.Second),
+			}, "classify")
+			client.http.Transport = transport
+			if _, err := client.Analyze(context.Background(), Input{Text: "test message"}); err != nil {
+				t.Fatal(err)
+			}
+			test.assert(t, body)
+			controls := 0
+			for _, key := range []string{"reasoning", "reasoning_effort"} {
+				if _, ok := body[key]; ok {
+					controls++
+				}
+			}
+			if controls != 1 {
+				t.Fatalf("expected exactly one reasoning control, got %d: %#v", controls, body)
+			}
+		})
 	}
 }
 

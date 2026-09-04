@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/ai"
-	"github.com/PhilAnderson1/SentinelMilter/internal/config"
-	"github.com/PhilAnderson1/SentinelMilter/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/ai"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
 func TestApplyPolicy(t *testing.T) {

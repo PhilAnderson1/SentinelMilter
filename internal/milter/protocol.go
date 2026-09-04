@@ -29,6 +29,7 @@ const (
 
 	responseAccept   = byte('a')
 	responseContinue = byte('c')
+	responseDiscard  = byte('d')
 	responseTempfail = byte('t')
 	responseReply    = byte('y')
 
@@ -71,7 +72,7 @@ func optionResponse(version uint32) []byte {
 	response := make([]byte, 13)
 	response[0] = commandOptionNegotiation
 	binary.BigEndian.PutUint32(response[1:5], version)
-	// SentinelMilter neither modifies messages nor suppresses protocol stages.
+	// MilterGuard neither modifies messages nor suppresses protocol stages.
 	binary.BigEndian.PutUint32(response[5:9], 0)
 	binary.BigEndian.PutUint32(response[9:13], 0)
 	return response

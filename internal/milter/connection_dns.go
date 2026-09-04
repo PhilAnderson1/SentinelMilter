@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
 const maxConnectionPTRNames = 5

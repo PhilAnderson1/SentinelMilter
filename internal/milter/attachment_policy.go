@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/attachment"
+	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
 )
 
 func (ss *session) applyAttachments(ctx context.Context) (bool, bool) {

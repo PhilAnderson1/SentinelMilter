@@ -1,0 +1,24 @@
+[Unit]
+Description=MilterGuard AI mail filter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=milterguard
+Group=milterguard
+RuntimeDirectory=milterguard
+RuntimeDirectoryMode=0750
+StateDirectory=milterguard
+StateDirectoryMode=0750
+ExecStart=/usr/local/sbin/milterguard --config /etc/milterguard/milterguard.yaml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/milterguard /var/lib/milterguard
+
+[Install]
+WantedBy=multi-user.target

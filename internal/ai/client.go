@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
 )
 
 type Decision struct {
@@ -64,12 +64,12 @@ func (c *Client) Analyze(ctx context.Context, input Input) (Decision, error) {
 		},
 	}
 	if c.cfg.DisableThinking {
-		// Send the controls used by llama.cpp chat templates and reasoning
-		// budgets, plus OpenRouter's unified reasoning parameter. Compatible
-		// endpoints can use the control they support and ignore the others.
-		reqBody["thinking_budget_tokens"] = 0
-		reqBody["reasoning"] = map[string]string{"effort": "none"}
-		reqBody["chat_template_kwargs"] = map[string]bool{"enable_thinking": false}
+		switch c.cfg.EndpointType {
+		case "openrouter":
+			reqBody["reasoning"] = map[string]bool{"enabled": false}
+		case "llamacpp", "openai":
+			reqBody["reasoning_effort"] = "none"
+		}
 	}
 	b, err := json.Marshal(reqBody)
 	if err != nil {

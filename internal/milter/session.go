@@ -13,8 +13,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/config"
-	"github.com/PhilAnderson1/SentinelMilter/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
 type protocolPhase uint8
@@ -173,7 +173,18 @@ func (ss *session) handleCommand(ctx context.Context, command byte, payload []by
 		if ss.phase != phaseEnvelope {
 			return ss.protocolError("milter transaction command outside message", "command", commandName(command))
 		}
-		if recipient, ok := parseEnvelopeAddress(payload); ok && len(ss.envelopeRecipients) < maxLearnedRecipients {
+		if recipient, ok := parseEnvelopeAddress(payload); ok && ss.isCommandRecipient(recipient) {
+			authorized, reason := ss.commandIdentityAuthorization()
+			if !authorized {
+				ss.server.log.WarnContext(ctx, "email command recipient rejected", "authenticated_identity", ss.authentication.Identity, "authenticated", ss.authentication.Authenticated, "reason", reason)
+				return ss.send(commandRecipient, replyCode("550", "5.7.1", "MilterGuard command rejected: "+reason))
+			}
+			if len(ss.envelopeRecipients) < maxLearnedRecipients {
+				ss.envelopeRecipients = append(ss.envelopeRecipients, recipient)
+			} else {
+				ss.envelopeRecipientsTruncated = true
+			}
+		} else if ok && len(ss.envelopeRecipients) < maxLearnedRecipients {
 			ss.envelopeRecipients = append(ss.envelopeRecipients, recipient)
 		} else if ok {
 			ss.envelopeRecipientsTruncated = true
@@ -243,6 +254,12 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	if ss.phase != phaseBody {
 		return ss.protocolError("unexpected milter end-of-body command")
 	}
+	if ss.isInternalMessage() {
+		return ss.finishBypassedMessage(ctx, "internal_command_reply", false, false)
+	}
+	if handled, keepConnection := ss.handleEmailCommand(ctx); handled {
+		return keepConnection
+	}
 	if ss.authentication.Authenticated && !ss.server.cfg.Filtering.ScanAuthenticated {
 		return ss.finishBypassedMessage(ctx, "authenticated_connection", true, false)
 	}
@@ -256,7 +273,8 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 			"trusted_aligned_dkim", inbound.trustedDKIM)
 	}
 	if inbound.bypassAI {
-		return ss.finishBypassedMessage(ctx, "correspondents", false, inbound.trustedDKIM)
+		return ss.finishBypassedMessage(ctx, "known_correspondent", false, inbound.trustedDKIM,
+			ss.knownCorrespondentLogAttrs()...)
 	}
 	ss.message.Connection = ss.connectionInformation(ctx)
 	_ = ss.conn.SetDeadline(time.Now().Add(ss.server.analysisTimeout()))
@@ -269,6 +287,24 @@ func (ss *session) finishMessage(ctx context.Context) bool {
 	ss.applyPostDecisionUpdates(ctx, result, inbound)
 	ss.resetMessage(phaseConnection)
 	return true
+}
+
+func (ss *session) knownCorrespondentLogAttrs() []any {
+	attrs := []any{"correspondent", normalizeEmailAddress(ss.message.Header("From"))}
+	seen := make(map[string]bool, len(ss.envelopeRecipients))
+	localAddresses := make([]string, 0, len(ss.envelopeRecipients))
+	for _, recipient := range ss.envelopeRecipients {
+		recipient = normalizeEmailAddress(recipient)
+		if recipient == "" || seen[recipient] {
+			continue
+		}
+		seen[recipient] = true
+		localAddresses = append(localAddresses, recipient)
+	}
+	if len(localAddresses) == 1 {
+		return append(attrs, "local_address", localAddresses[0])
+	}
+	return append(attrs, "local_addresses", localAddresses)
 }
 
 type inboundEvidence struct {
@@ -323,6 +359,9 @@ func (ss *session) recipientSetComplete() bool {
 func (ss *session) applyPostDecisionUpdates(ctx context.Context, result evaluationResult, inbound inboundEvidence) {
 	if result.selected == actionReject && ss.server.cfg.Mode == "enforce" {
 		ss.server.ipReputation.add(ss.peerIP, result.classification, result.score, ss.connectionDNS)
+		if err := ss.server.rejectionHistory.add(ss.message.Header("From"), ss.envelopeSender, ss.envelopeRecipients, result.reasons); err != nil {
+			ss.server.log.ErrorContext(ctx, "cannot save rejection history", "message_id", ss.message.Header("Message-ID"), "error", err)
+		}
 	}
 	if result.err == nil && result.classification == "legitimate" {
 		ss.server.ipReputation.recordLegitimate(ss.peerIP)
@@ -423,7 +462,11 @@ func (ss *session) finishBypassedMessage(ctx context.Context, source string, lea
 	if touchInbound {
 		ss.touchInboundCorrespondent(ctx)
 	}
-	ss.server.log.InfoContext(ctx, "message bypassed AI analysis", attrs...)
+	if source == "internal_command_reply" {
+		ss.server.log.DebugContext(ctx, "message bypassed AI analysis", attrs...)
+	} else {
+		ss.server.log.InfoContext(ctx, "message bypassed AI analysis", attrs...)
+	}
 	ss.resetMessage(phaseConnection)
 	return true
 }

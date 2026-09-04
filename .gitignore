@@ -4,3 +4,5 @@
 /session.txt
 *.swp
 /local-testing/
+__pycache__/
+*.pyc

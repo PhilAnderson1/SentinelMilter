@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/jsonfile"
+	"github.com/PhilAnderson1/MilterGuard/internal/jsonfile"
 )
 
 func (s *correspondentStore) load() error {
@@ -56,6 +56,15 @@ func (s *correspondentStore) load() error {
 }
 
 func (s *correspondentStore) saveLocked() error {
+	if s.deferWrites {
+		s.dirty = true
+		s.markActivityPersistedLocked()
+		return nil
+	}
+	return s.writeLocked()
+}
+
+func (s *correspondentStore) writeLocked() error {
 	entries := make([]correspondentEntry, 0, len(s.entries))
 	for _, entry := range s.entries {
 		entries = append(entries, entry)
@@ -69,9 +78,38 @@ func (s *correspondentStore) saveLocked() error {
 	if err := jsonfile.Write(s.cfg.File, correspondentFile{Version: correspondentFileVersion, Entries: entries}, 0750, 0640); err != nil {
 		return err
 	}
+	s.markActivityPersistedLocked()
+	return nil
+}
+
+func (s *correspondentStore) markActivityPersistedLocked() {
 	for key, entry := range s.entries {
 		entry.PersistedActivityAt = entry.LastActivityAt
 		s.entries[key] = entry
 	}
+}
+
+func (s *correspondentStore) enableDeferredPersistence() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.deferWrites = true
+	s.mu.Unlock()
+}
+
+func (s *correspondentStore) flush() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.dirty {
+		return nil
+	}
+	if err := s.writeLocked(); err != nil {
+		return err
+	}
+	s.dirty = false
 	return nil
 }

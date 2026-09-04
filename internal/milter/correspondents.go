@@ -5,11 +5,12 @@ import (
 	"log/slog"
 	"net/mail"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
 )
 
 const (
@@ -45,11 +46,13 @@ type correspondentMatch struct {
 }
 
 type correspondentStore struct {
-	mu      sync.RWMutex
-	cfg     config.CorrespondentsConfig
-	entries map[string]correspondentEntry
-	now     func() time.Time
-	log     *slog.Logger
+	mu          sync.RWMutex
+	cfg         config.CorrespondentsConfig
+	entries     map[string]correspondentEntry
+	now         func() time.Time
+	log         *slog.Logger
+	deferWrites bool
+	dirty       bool
 }
 
 func newCorrespondentStore(cfg config.CorrespondentsConfig, log *slog.Logger) *correspondentStore {
@@ -354,6 +357,47 @@ func (s *correspondentStore) match(correspondent string, recipients []string) co
 	result.Known = result.MatchedRecipients > 0
 	result.AllRecipientsMatched = result.MatchedRecipients == result.TotalRecipients
 	return result
+}
+
+func (s *correspondentStore) listAllowlist(recipient string) []correspondentEntry {
+	if s == nil {
+		return nil
+	}
+	allRecipients := recipient == "*"
+	if !allRecipients {
+		recipient = normalizeEmailAddress(recipient)
+		if recipient == "" {
+			return nil
+		}
+	}
+	s.removeStale()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]correspondentEntry, 0)
+	for _, entry := range s.entries {
+		if s.qualified(entry) && (allRecipients || entry.LocalAddress == recipient) {
+			result = append(result, entry)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		iActivity := correspondentActivityTime(result[i])
+		jActivity := correspondentActivityTime(result[j])
+		if !iActivity.Equal(jActivity) {
+			return iActivity.After(jActivity)
+		}
+		if result[i].LocalAddress != result[j].LocalAddress {
+			return result[i].LocalAddress < result[j].LocalAddress
+		}
+		return result[i].Correspondent < result[j].Correspondent
+	})
+	return result
+}
+
+func correspondentActivityTime(entry correspondentEntry) time.Time {
+	if !entry.LastActivityAt.IsZero() {
+		return entry.LastActivityAt
+	}
+	return entry.LearnedAt
 }
 
 func (s *correspondentStore) evictOldestLocked() {

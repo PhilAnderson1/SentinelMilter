@@ -1,15 +1,18 @@
 package milter
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/config"
-	"github.com/PhilAnderson1/SentinelMilter/internal/message"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/message"
 )
 
 const (
@@ -26,6 +29,57 @@ type ipBlock struct {
 	score          float64
 	level          string
 	strikeCount    int
+}
+
+type activeIPBlock struct {
+	IP        string
+	Hostname  string
+	Level     string
+	ExpiresAt time.Time
+}
+
+func (s *Server) resolveActiveIPHostnames(parent context.Context, entries []activeIPBlock) []activeIPBlock {
+	if len(entries) == 0 || s.resolver == nil || s.cfg.Milter.ConnectionDNSTimeout.Value() <= 0 {
+		return entries
+	}
+	indices := make(chan int)
+	var wg sync.WaitGroup
+	for range min(8, len(entries)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range indices {
+				addr, err := netip.ParseAddr(entries[index].IP)
+				if err != nil || !connectionAddressRoutable(addr) {
+					continue
+				}
+				ctx, cancel := context.WithTimeout(parent, s.cfg.Milter.ConnectionDNSTimeout.Value())
+				names, err := s.resolver.LookupAddr(ctx, addr.String())
+				cancel()
+				if err != nil {
+					continue
+				}
+				for _, candidate := range names {
+					if hostname := safeDNSHostname(candidate); hostname != "" {
+						entries[index].Hostname = hostname
+						break
+					}
+				}
+			}
+		}()
+	}
+	for index := range entries {
+		select {
+		case indices <- index:
+		case <-parent.Done():
+			close(indices)
+			wg.Wait()
+			return entries
+		}
+	}
+	close(indices)
+	wg.Wait()
+	return entries
 }
 
 type rejectedIPRecord struct {
@@ -60,6 +114,8 @@ type ipReputationStore struct {
 	domainAllowlist        []string
 	now                    func() time.Time
 	log                    *slog.Logger
+	deferWrites            bool
+	dirty                  bool
 }
 
 func newIPReputationStore(reputation config.IPReputationConfig, log *slog.Logger) *ipReputationStore {
@@ -351,4 +407,87 @@ func (c *ipReputationStore) size() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.entries)
+}
+
+func (c *ipReputationStore) manualAdd(addr netip.Addr) (activeIPBlock, error) {
+	if !c.enabled() || !addr.IsValid() {
+		return activeIPBlock{}, fmt.Errorf("IP reputation blocking is disabled or the address is invalid")
+	}
+	addr = addr.Unmap()
+	if prefix, allowed := c.allowed(addr); allowed {
+		return activeIPBlock{}, fmt.Errorf("IP address is protected by allowlist %s", prefix)
+	}
+	now := c.now().UTC()
+	level, duration := rejectedIPBlockRepeat, c.repeatDuration
+	if duration <= 0 {
+		level, duration = rejectedIPBlockShort, c.shortDuration
+	}
+	if duration <= 0 {
+		return activeIPBlock{}, fmt.Errorf("no IP block duration is configured")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	before := cloneRejectedIPEntries(c.entries)
+	if _, exists := c.entries[addr]; !exists && len(c.entries) >= c.maxSize {
+		c.evictOldestLocked()
+	}
+	record := c.entries[addr]
+	record.IP, record.BlockLevel = addr.String(), level
+	record.BlockedUntil, record.LastActivityAt = now.Add(duration), now
+	record.Classification, record.Score, record.LegitimateCount = "manual", 1, 0
+	record.PersistedRefreshAt = now
+	c.entries[addr] = record
+	if err := c.saveLocked(); err != nil {
+		c.entries = before
+		return activeIPBlock{}, err
+	}
+	c.debug("sending IP manually blocked", "remote_ip", addr.String(), "block_level", level, "block_expires_at", record.BlockedUntil, "cache_size", len(c.entries))
+	return activeIPBlock{IP: addr.String(), Level: level, ExpiresAt: record.BlockedUntil}, nil
+}
+
+func (c *ipReputationStore) manualDelete(addr netip.Addr) (bool, error) {
+	if c == nil || !addr.IsValid() {
+		return false, fmt.Errorf("invalid IP address")
+	}
+	addr = addr.Unmap()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	before := cloneRejectedIPEntries(c.entries)
+	if _, found := c.entries[addr]; !found {
+		return false, nil
+	}
+	delete(c.entries, addr)
+	if err := c.saveLocked(); err != nil {
+		c.entries = before
+		return false, err
+	}
+	c.debug("sending IP manually removed from rejection reputation", "remote_ip", addr.String(), "cache_size", len(c.entries))
+	return true, nil
+}
+
+func (c *ipReputationStore) listActive() []activeIPBlock {
+	if !c.enabled() {
+		return nil
+	}
+	now := c.now().UTC()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cleanupLocked(now)
+	result := make([]activeIPBlock, 0)
+	for _, record := range c.entries {
+		if (record.BlockLevel == rejectedIPBlockShort || record.BlockLevel == rejectedIPBlockRepeat) && record.BlockedUntil.After(now) {
+			result = append(result, activeIPBlock{IP: record.IP, Level: record.BlockLevel, ExpiresAt: record.BlockedUntil})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].IP < result[j].IP })
+	return result
+}
+
+func cloneRejectedIPEntries(entries map[netip.Addr]rejectedIPRecord) map[netip.Addr]rejectedIPRecord {
+	clone := make(map[netip.Addr]rejectedIPRecord, len(entries))
+	for addr, record := range entries {
+		record.Strikes = append([]time.Time(nil), record.Strikes...)
+		clone[addr] = record
+	}
+	return clone
 }

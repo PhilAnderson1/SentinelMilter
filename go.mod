@@ -1,4 +1,4 @@
-module github.com/PhilAnderson1/SentinelMilter
+module github.com/PhilAnderson1/MilterGuard
 
 go 1.25.0
 

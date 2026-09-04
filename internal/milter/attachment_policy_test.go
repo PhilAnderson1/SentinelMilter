@@ -3,12 +3,12 @@ package milter
 import (
 	"testing"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/ai"
-	"github.com/PhilAnderson1/SentinelMilter/internal/attachment"
+	"github.com/PhilAnderson1/MilterGuard/internal/ai"
+	"github.com/PhilAnderson1/MilterGuard/internal/attachment"
 )
 
 func enableTestAttachments(server *Server) {
-	server.cfg.Attachments.Block = true
+	server.cfg.Attachments.BlockExecutables = true
 	server.cfg.Attachments.BlockedExtensions = []string{"exe"}
 	server.cfg.Attachments.InspectSignatures = true
 	server.cfg.Attachments.InspectArchives = true

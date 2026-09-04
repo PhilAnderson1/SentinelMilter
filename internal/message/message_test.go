@@ -11,11 +11,18 @@ const onePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mN
 func TestPromptDecodesMultipart(t *testing.T) {
 	m := New(10000)
 	m.AddHeader("Subject", "Test")
+	m.AddHeader("Message-ID", "<test@example.invalid>")
 	m.AddHeader("Content-Type", `multipart/alternative; boundary="x"`)
 	m.AddBody([]byte("--x\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\naGVsbG8=\r\n--x--\r\n"))
 	p := m.Prompt(1000)
 	if !strings.Contains(p, "hello") {
 		t.Fatalf("decoded text missing: %s", p)
+	}
+	if strings.Contains(p, "Content-Type:") {
+		t.Fatalf("MIME content type leaked into selected headers: %s", p)
+	}
+	if strings.Contains(p, "Message-Id:") {
+		t.Fatalf("message ID leaked into selected headers: %s", p)
 	}
 }
 
@@ -163,6 +170,20 @@ func TestLinkInventorySurvivesOmittedBodySection(t *testing.T) {
 	prompt := m.Prompt(100)
 	if !strings.Contains(prompt, "EXTRACTED LINKS") || !strings.Contains(prompt, "- "+link) {
 		t.Fatalf("independent link inventory omitted a link outside sampled text: %s", prompt)
+	}
+}
+
+func TestLinkInventoryDoesNotDuplicateLinkRetainedInBody(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/html")
+	link := "https://example.org/action"
+	m.AddBody([]byte(`<p>Take action <a href="` + link + `">today</a>.</p>`))
+	prompt := m.Prompt(1000)
+	if !strings.Contains(prompt, "[link: "+link+"]") {
+		t.Fatalf("body omitted link destination: %s", prompt)
+	}
+	if strings.Contains(prompt, "EXTRACTED LINKS") {
+		t.Fatalf("link retained in body was duplicated in extracted inventory: %s", prompt)
 	}
 }
 

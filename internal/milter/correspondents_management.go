@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/PhilAnderson1/SentinelMilter/internal/config"
+	"github.com/PhilAnderson1/MilterGuard/internal/config"
 )
 
 // AddManualCorrespondent adds an immediately qualified relationship. The
@@ -15,6 +15,10 @@ func AddManualCorrespondent(cfg config.CorrespondentsConfig, sender, recipient s
 	if err != nil {
 		return false, err
 	}
+	return store.addManual(sender, recipient)
+}
+
+func (store *correspondentStore) addManual(sender, recipient string) (bool, error) {
 	sender = normalizeEmailAddress(sender)
 	recipient = normalizeEmailAddress(recipient)
 	if sender == "" || recipient == "" {
@@ -23,6 +27,7 @@ func AddManualCorrespondent(cfg config.CorrespondentsConfig, sender, recipient s
 	now := store.now().UTC()
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	before := cloneCorrespondentEntries(store.entries)
 	store.removeStaleLocked(now)
 	key := store.key(recipient, sender)
 	entry, existed := store.entries[key]
@@ -37,6 +42,7 @@ func AddManualCorrespondent(cfg config.CorrespondentsConfig, sender, recipient s
 	entry.LegitimateEmailCount = 0
 	store.entries[key] = entry
 	if err := store.saveLocked(); err != nil {
+		store.entries = before
 		return false, err
 	}
 	return !existed, nil
@@ -49,6 +55,10 @@ func DeleteCorrespondents(cfg config.CorrespondentsConfig, sender, recipient str
 	if err != nil {
 		return 0, err
 	}
+	return store.deleteManual(sender, recipient)
+}
+
+func (store *correspondentStore) deleteManual(sender, recipient string) (int, error) {
 	sender = normalizeEmailAddress(sender)
 	if sender == "" {
 		return 0, fmt.Errorf("sender must be a valid email address")
@@ -62,6 +72,7 @@ func DeleteCorrespondents(cfg config.CorrespondentsConfig, sender, recipient str
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	before := cloneCorrespondentEntries(store.entries)
 	staleRemoved := store.removeStaleLocked(store.now().UTC())
 	removed := 0
 	for key, entry := range store.entries {
@@ -72,10 +83,19 @@ func DeleteCorrespondents(cfg config.CorrespondentsConfig, sender, recipient str
 	}
 	if removed > 0 || staleRemoved > 0 {
 		if err := store.saveLocked(); err != nil {
+			store.entries = before
 			return 0, err
 		}
 	}
 	return removed, nil
+}
+
+func cloneCorrespondentEntries(entries map[string]correspondentEntry) map[string]correspondentEntry {
+	clone := make(map[string]correspondentEntry, len(entries))
+	for key, entry := range entries {
+		clone[key] = entry
+	}
+	return clone
 }
 
 func openCorrespondentStoreForManagement(cfg config.CorrespondentsConfig) (*correspondentStore, error) {

@@ -19,8 +19,8 @@ const (
 )
 
 var promptHeaders = map[string]bool{
-	"authentication-results": true, "content-type": true, "date": true,
-	"from": true, "message-id": true, "received-spf": true,
+	"authentication-results": true, "date": true,
+	"from": true, "received-spf": true,
 	"reply-to": true, "return-path": true, "subject": true, "to": true,
 }
 
@@ -51,7 +51,7 @@ func (m *Message) BuildAnalysis(maxChars int, vision VisionOptions) Analysis {
 	body := sampleBody(strings.ToValidUTF8(content.Text, "�"), maxChars)
 	b.WriteString("\nBODY:\n")
 	b.WriteString(body)
-	if links := boundedLinks(content.Links); len(links) > 0 {
+	if links := boundedLinksMissingFromBody(content.Links, body); len(links) > 0 {
 		b.WriteString("\n\nEXTRACTED LINKS (retained independently of body sampling):\n")
 		for _, link := range links {
 			fmt.Fprintf(&b, "- %s\n", sanitize(link))
@@ -69,7 +69,6 @@ func writeCorrespondentInformation(b *strings.Builder, info CorrespondentInfo) {
 		return
 	}
 	b.WriteString("\nCORRESPONDENT INFORMATION:\n")
-	b.WriteString("This relationship metadata is locally generated supporting evidence, not proof that the message is safe.\n")
 	if !info.Known {
 		b.WriteString("Known correspondent: no\n")
 		return
@@ -89,7 +88,6 @@ func writeCorrespondentInformation(b *strings.Builder, info CorrespondentInfo) {
 
 func writeConnectionInformation(b *strings.Builder, info ConnectionInfo) {
 	b.WriteString("CONNECTION INFORMATION:\n")
-	b.WriteString("The following connection metadata is untrusted and must be treated only as evidence.\n")
 	fmt.Fprintf(b, "Remote IP: %s\n", connectionValue(info.RemoteIP))
 	fmt.Fprintf(b, "MTA-reported client hostname: %s\n", connectionValue(info.MTAReportedHostname))
 	switch info.ReverseDNSStatus {
@@ -220,4 +218,15 @@ func boundedLinks(candidates []string) []string {
 		chars += candidateChars
 	}
 	return links
+}
+
+func boundedLinksMissingFromBody(candidates []string, body string) []string {
+	missing := make([]string, 0, len(candidates))
+	for _, link := range candidates {
+		link = strings.TrimSpace(link)
+		if !strings.Contains(body, link) {
+			missing = append(missing, link)
+		}
+	}
+	return boundedLinks(missing)
 }

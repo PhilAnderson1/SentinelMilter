@@ -3,8 +3,12 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
+	"net/mail"
 	"net/netip"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,18 +30,43 @@ func (d *Duration) UnmarshalText(text []byte) error {
 func (d Duration) Value() time.Duration { return time.Duration(d) }
 
 type Config struct {
-	Mode           string               `yaml:"mode"`
-	Milter         MilterConfig         `yaml:"milter"`
-	AI             AIConfig             `yaml:"ai"`
-	Filtering      FilteringConfig      `yaml:"filtering"`
-	Attachments    AttachmentsConfig    `yaml:"attachments"`
-	Correspondents CorrespondentsConfig `yaml:"correspondents"`
-	IPReputation   IPReputationConfig   `yaml:"ip_reputation"`
-	Logging        LoggingConfig        `yaml:"logging"`
+	Mode             string                 `yaml:"mode"`
+	Milter           MilterConfig           `yaml:"milter"`
+	AI               AIConfig               `yaml:"ai"`
+	Filtering        FilteringConfig        `yaml:"filtering"`
+	Attachments      AttachmentsConfig      `yaml:"attachments"`
+	EmailCommands    EmailCommandsConfig    `yaml:"email_commands"`
+	Persistence      PersistenceConfig      `yaml:"persistence"`
+	RejectionHistory RejectionHistoryConfig `yaml:"rejection_history"`
+	Correspondents   CorrespondentsConfig   `yaml:"correspondents"`
+	IPReputation     IPReputationConfig     `yaml:"ip_reputation"`
+	Logging          LoggingConfig          `yaml:"logging"`
+}
+
+type PersistenceConfig struct {
+	FlushInterval Duration `yaml:"flush_interval"`
+}
+
+type RejectionHistoryConfig struct {
+	File       string   `yaml:"file"`
+	Expiry     Duration `yaml:"expiry"`
+	MaxEntries int      `yaml:"max_entries"`
+}
+
+type EmailCommandsConfig struct {
+	Enabled                 bool     `yaml:"enabled"`
+	Recipient               string   `yaml:"recipient"`
+	AllowAuthenticatedUsers bool     `yaml:"allow_authenticated_users"`
+	VerifySenderViaAliases  bool     `yaml:"verify_sender_via_aliases"`
+	AliasesFile             string   `yaml:"aliases_file"`
+	Administrators          []string `yaml:"administrators"`
+	SendReplies             bool     `yaml:"send_replies"`
+	SMTPHost                string   `yaml:"smtp_host"`
+	MaxMessageBytes         int64    `yaml:"max_message_bytes"`
 }
 
 type AttachmentsConfig struct {
-	Block                       bool     `yaml:"block"`
+	BlockExecutables            bool     `yaml:"block_executables"`
 	BlockedExtensions           []string `yaml:"blocked_extensions"`
 	InspectSignatures           bool     `yaml:"inspect_file_signatures"`
 	InspectArchives             bool     `yaml:"inspect_archives"`
@@ -57,6 +86,7 @@ type MilterConfig struct {
 }
 type AIConfig struct {
 	Endpoint           string   `yaml:"endpoint"`
+	EndpointType       string   `yaml:"endpoint_type"`
 	APIKey             string   `yaml:"api_key"`
 	APIKeyEnv          string   `yaml:"api_key_env"`
 	Model              string   `yaml:"model"`
@@ -78,7 +108,8 @@ type FilteringConfig struct {
 	AIErrorAction                    string   `yaml:"ai_error_action"`
 	RejectMessage                    string   `yaml:"reject_message"`
 	ScanAuthenticated                bool     `yaml:"scan_authenticated"`
-	SenderDomainAllowlist            []string `yaml:"sender_domain_allowlist"`
+	SenderDomainAllowlistFile        string   `yaml:"sender_domain_allowlist"`
+	SenderDomainAllowlist            []string `yaml:"-"`
 	SenderDomainAllowlistRequireDKIM bool     `yaml:"sender_domain_allowlist_require_dkim"`
 }
 type IPReputationConfig struct {
@@ -131,6 +162,13 @@ func Load(path string) (Config, error) {
 	if c.AI.APIKey == "" && c.AI.APIKeyEnv != "" {
 		c.AI.APIKey = os.Getenv(c.AI.APIKeyEnv)
 	}
+	if c.Filtering.SenderDomainAllowlistFile != "" {
+		domains, err := loadSenderDomainAllowlist(c.Filtering.SenderDomainAllowlistFile)
+		if err != nil {
+			return Config{}, err
+		}
+		c.Filtering.SenderDomainAllowlist = domains
+	}
 	if err := c.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -141,14 +179,14 @@ func defaults() Config {
 	return Config{
 		Mode: "monitor",
 		Milter: MilterConfig{
-			Socket: "unix:/run/sentinelmilter/sentinelmilter.sock", Timeout: Duration(30 * time.Second),
+			Socket: "unix:/run/milterguard/milterguard.sock", Timeout: Duration(30 * time.Second),
 			ConnectionDNSTimeout: Duration(2 * time.Second), MaxMessageSize: 10 << 20,
 		},
 		AI: AIConfig{
-			Endpoint: "https://openrouter.ai/api/v1/chat/completions", Timeout: Duration(15 * time.Second),
+			Endpoint: "https://openrouter.ai/api/v1/chat/completions", EndpointType: "openrouter", Timeout: Duration(15 * time.Second),
 			MaxConcurrent: 8,
 			MaxBodyChars:  50000, VisionMode: "off", VisionMinTextChars: 200,
-			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000, AppName: "SentinelMilter",
+			MaxImages: 2, MaxImageBytes: 2 << 20, MaxImagePixels: 12_000_000, AppName: "MilterGuard",
 		},
 		Attachments: AttachmentsConfig{
 			BlockedExtensions: []string{"exe", "com", "scr", "pif", "bat", "cmd", "ps1", "vbs", "js", "jse", "msi", "dll", "jar", "lnk", "iso", "7z", "rar"},
@@ -156,6 +194,14 @@ func defaults() Config {
 			MaxArchiveDepth: 2, MaxArchiveFiles: 100, MaxArchiveUncompressedBytes: 50 << 20,
 			EncryptedArchiveAction: "reject", UnscannableAction: "accept",
 			RejectMessage: "Message rejected because it contains a prohibited executable attachment",
+		},
+		EmailCommands: EmailCommandsConfig{
+			Recipient: "milterguard@example.com", SendReplies: true,
+			SMTPHost: "127.0.0.1:25", MaxMessageBytes: 8192, AliasesFile: "/etc/aliases",
+		},
+		Persistence: PersistenceConfig{FlushInterval: Duration(time.Minute)},
+		RejectionHistory: RejectionHistoryConfig{
+			File: "/var/lib/milterguard/rejection-history.json", Expiry: Duration(30 * 24 * time.Hour), MaxEntries: 10000,
 		},
 		Filtering: FilteringConfig{
 			RejectScore: .95, AIErrorAction: "accept", RejectMessage: "Message rejected as suspected spam or fraud",
@@ -165,11 +211,11 @@ func defaults() Config {
 			RepeatThreshold: 3, RepeatWindow: Duration(30 * 24 * time.Hour),
 			RepeatBlockDuration: Duration(30 * 24 * time.Hour), RepeatRefreshOnAttempt: true,
 			LegitimatePerStrike: 3, MaxEntries: 10000,
-			StateFile: "/var/lib/sentinelmilter/rejected-ip-state.json",
+			StateFile: "/var/lib/milterguard/rejected-ip-state.json",
 		},
 		Correspondents: CorrespondentsConfig{
 			LegitimateSenderMinMessages: 5, LegitimateSenderMinScore: .99, LegitimateSenderRequireDKIM: true,
-			Scope: "per_sender", RecipientMatch: "all", File: "/var/lib/sentinelmilter/correspondent-allowlist.json",
+			Scope: "per_sender", RecipientMatch: "all", File: "/var/lib/milterguard/correspondent-allowlist.json",
 			TrustedAuthservIDs: []string{MTAHostnameAuthservID}, MaxEntries: 10000,
 			StaleAfter: Duration(365 * 24 * time.Hour), ActivityUpdateInterval: Duration(24 * time.Hour),
 		},
@@ -187,8 +233,14 @@ func (c Config) Validate() error {
 	if c.Milter.ConnectionDNSTimeout.Value() < 0 {
 		return fmt.Errorf("milter.connection_dns_timeout must not be negative")
 	}
+	if c.Persistence.FlushInterval.Value() < 0 {
+		return fmt.Errorf("persistence.flush_interval must not be negative")
+	}
 	if c.AI.Endpoint == "" || c.AI.Model == "" || c.AI.PromptFile == "" {
 		return fmt.Errorf("ai endpoint, model, and prompt_file are required")
+	}
+	if c.AI.EndpointType != "openrouter" && c.AI.EndpointType != "llamacpp" && c.AI.EndpointType != "openai" {
+		return fmt.Errorf("ai.endpoint_type must be openrouter, llamacpp, or openai")
 	}
 	if c.AI.APIKey == "" {
 		return fmt.Errorf("ai api_key is empty (and api_key_env is unset or empty)")
@@ -203,8 +255,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("invalid AI vision limits")
 	}
 	attachments := c.Attachments
-	if attachments.Block && len(attachments.BlockedExtensions) == 0 && !attachments.InspectSignatures {
-		return fmt.Errorf("attachments requires blocked_extensions or inspect_file_signatures when block is true")
+	if attachments.BlockExecutables && len(attachments.BlockedExtensions) == 0 && !attachments.InspectSignatures {
+		return fmt.Errorf("attachments requires blocked_extensions or inspect_file_signatures when block_executables is true")
 	}
 	if attachments.MaxAttachmentBytes < 1 || attachments.MaxAttachmentBytes > 64<<20 ||
 		attachments.MaxArchiveDepth < 1 || attachments.MaxArchiveDepth > 8 ||
@@ -232,11 +284,51 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(attachments.RejectMessage) == "" {
 		return fmt.Errorf("attachments.reject_message must not be empty")
 	}
+	commands := c.EmailCommands
+	if commands.MaxMessageBytes < 1 || commands.MaxMessageBytes > 64<<10 {
+		return fmt.Errorf("email_commands.max_message_bytes must be between 1 and 65536")
+	}
+	if commands.Enabled {
+		if !validEmailAddress(commands.Recipient) {
+			return fmt.Errorf("email_commands.recipient must be a valid email address")
+		}
+		if !commands.AllowAuthenticatedUsers && len(commands.Administrators) == 0 {
+			return fmt.Errorf("email_commands requires an administrator or allow_authenticated_users")
+		}
+		if commands.SendReplies && !validSMTPHost(commands.SMTPHost) {
+			return fmt.Errorf("email_commands.smtp_host must contain a valid host and port")
+		}
+		if !c.Correspondents.UseAllowlist || strings.TrimSpace(c.Correspondents.File) == "" {
+			return fmt.Errorf("email_commands requires correspondents.use_allowlist and correspondents.file")
+		}
+		if commands.AllowAuthenticatedUsers && commands.VerifySenderViaAliases && !strings.HasPrefix(commands.AliasesFile, "/") {
+			return fmt.Errorf("email_commands.aliases_file must be an absolute path")
+		}
+	}
+	for _, identity := range commands.Administrators {
+		if strings.TrimSpace(identity) == "" || len(identity) > 1024 || strings.ContainsAny(identity, "\r\n\x00") {
+			return fmt.Errorf("email_commands.administrators contains an invalid identity")
+		}
+	}
+	if c.RejectionHistory.Expiry.Value() < 0 {
+		return fmt.Errorf("rejection_history.expiry must not be negative")
+	}
+	if c.RejectionHistory.Expiry.Value() > 0 {
+		if strings.TrimSpace(c.RejectionHistory.File) == "" {
+			return fmt.Errorf("rejection_history.file is required when rejection history is enabled")
+		}
+		if c.RejectionHistory.MaxEntries < 1 {
+			return fmt.Errorf("rejection_history.max_entries must be positive")
+		}
+	}
 	if c.Filtering.RejectScore < 0 || c.Filtering.RejectScore > 1 {
 		return fmt.Errorf("filtering.reject_score must be between 0 and 1")
 	}
 	if c.Filtering.AIErrorAction != "accept" && c.Filtering.AIErrorAction != "tempfail" {
 		return fmt.Errorf("filtering.ai_error_action must be accept or tempfail")
+	}
+	if c.Filtering.SenderDomainAllowlistFile != "" && !filepath.IsAbs(c.Filtering.SenderDomainAllowlistFile) {
+		return fmt.Errorf("filtering.sender_domain_allowlist must be an absolute path")
 	}
 	for _, domain := range c.Filtering.SenderDomainAllowlist {
 		if !validDomainName(domain) {
@@ -321,6 +413,50 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func loadSenderDomainAllowlist(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read filtering.sender_domain_allowlist: %w", err)
+	}
+	if len(b) > 1<<20 {
+		return nil, fmt.Errorf("filtering.sender_domain_allowlist exceeds 1 MiB")
+	}
+	domains := make([]string, 0)
+	seen := make(map[string]bool)
+	for index, raw := range strings.Split(string(b), "\n") {
+		value := strings.TrimSpace(raw)
+		if value == "" || strings.HasPrefix(value, "#") {
+			continue
+		}
+		value = strings.TrimSuffix(strings.ToLower(value), ".")
+		if !validDomainName(value) {
+			return nil, fmt.Errorf("invalid domain on line %d of filtering.sender_domain_allowlist: %q", index+1, value)
+		}
+		if !seen[value] {
+			domains = append(domains, value)
+			seen[value] = true
+		}
+	}
+	if len(domains) == 0 {
+		return nil, fmt.Errorf("filtering.sender_domain_allowlist contains no domains")
+	}
+	return domains, nil
+}
+
+func validEmailAddress(value string) bool {
+	address, err := mail.ParseAddress(strings.TrimSpace(value))
+	return err == nil && address.Address == strings.TrimSpace(value) && strings.Contains(address.Address, "@")
+}
+
+func validSMTPHost(value string) bool {
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(value))
+	if err != nil || strings.TrimSpace(host) == "" || strings.ContainsAny(host, " \t\r\n\x00") {
+		return false
+	}
+	port, err := strconv.Atoi(portText)
+	return err == nil && port >= 1 && port <= 65535
 }
 
 func validAttachmentAction(value string) bool {

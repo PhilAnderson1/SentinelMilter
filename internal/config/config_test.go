@@ -11,7 +11,7 @@ import (
 func TestLoadAcceptsNewSectionsAndRejectsLegacySections(t *testing.T) {
 	writeConfig := func(t *testing.T, content string) string {
 		t.Helper()
-		path := filepath.Join(t.TempDir(), "sentinelmilter.yaml")
+		path := filepath.Join(t.TempDir(), "milterguard.yaml")
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -27,11 +27,13 @@ ai:
 filtering:
   reject_score: 0.8
 attachments:
-  block: false
+  block_executables: false
 correspondents:
   scope: global
 ip_reputation:
   max_entries: 42
+persistence:
+  flush_interval: 2m
 logging:
   level: warn
 `
@@ -39,13 +41,28 @@ logging:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 {
+	if cfg.AI.MaxConcurrent != 3 || cfg.Filtering.RejectScore != 0.8 || cfg.Correspondents.Scope != "global" || cfg.IPReputation.MaxEntries != 42 || cfg.Persistence.FlushInterval.Value() != 2*time.Minute {
 		t.Fatalf("new configuration sections not loaded: %#v", cfg)
 	}
 
 	legacy := valid + "\npolicy:\n  reject_score: 0.9\n"
 	if _, err := Load(writeConfig(t, legacy)); err == nil || !strings.Contains(err.Error(), "field policy not found") {
 		t.Fatalf("legacy policy section error = %v", err)
+	}
+}
+
+func TestValidatePersistenceFlushInterval(t *testing.T) {
+	if defaults().Persistence.FlushInterval.Value() != time.Minute {
+		t.Fatal("persistence flush interval must default to one minute")
+	}
+	cfg := validConfig()
+	cfg.Persistence.FlushInterval = Duration(-time.Second)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "persistence.flush_interval") {
+		t.Fatalf("negative persistence interval error = %v", err)
+	}
+	cfg.Persistence.FlushInterval = 0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("immediate persistence rejected: %v", err)
 	}
 }
 
@@ -60,6 +77,58 @@ func validConfig() Config {
 func TestAuthenticatedMailScanningDefaultsEnabled(t *testing.T) {
 	if !defaults().Filtering.ScanAuthenticated {
 		t.Fatal("authenticated mail scanning must default to enabled")
+	}
+}
+
+func TestValidateAIEndpointType(t *testing.T) {
+	for _, endpointType := range []string{"openrouter", "llamacpp", "openai"} {
+		cfg := validConfig()
+		cfg.AI.EndpointType = endpointType
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("endpoint type %q rejected: %v", endpointType, err)
+		}
+	}
+	cfg := validConfig()
+	cfg.AI.EndpointType = "unknown"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ai.endpoint_type") {
+		t.Fatalf("invalid endpoint type error = %v", err)
+	}
+}
+
+func TestValidateEmailCommands(t *testing.T) {
+	cfg := validConfig()
+	cfg.EmailCommands.Enabled = true
+	cfg.EmailCommands.Recipient = "milterguard@example.com"
+	cfg.EmailCommands.AllowAuthenticatedUsers = true
+	cfg.Correspondents.UseAllowlist = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.EmailCommands.Recipient = "not-an-address"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "email_commands.recipient") {
+		t.Fatalf("invalid command recipient error = %v", err)
+	}
+	cfg = validConfig()
+	cfg.EmailCommands.Enabled = true
+	cfg.EmailCommands.AllowAuthenticatedUsers = true
+	cfg.EmailCommands.SMTPHost = "missing-port"
+	cfg.Correspondents.UseAllowlist = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "email_commands.smtp_host") {
+		t.Fatalf("invalid SMTP host error = %v", err)
+	}
+}
+
+func TestValidateRejectionHistory(t *testing.T) {
+	cfg := validConfig()
+	cfg.RejectionHistory.Expiry = Duration(-time.Second)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "rejection_history.expiry") {
+		t.Fatalf("negative expiry error = %v", err)
+	}
+	cfg = validConfig()
+	cfg.RejectionHistory.Expiry = Duration(time.Hour)
+	cfg.RejectionHistory.File = ""
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "rejection_history.file") {
+		t.Fatalf("missing history file error = %v", err)
 	}
 }
 
@@ -108,8 +177,57 @@ func TestValidateSenderDomainAllowlist(t *testing.T) {
 	}
 }
 
+func TestLoadSenderDomainAllowlistFile(t *testing.T) {
+	directory := t.TempDir()
+	domainsPath := filepath.Join(directory, "trusted-sender-domains.txt")
+	if err := os.WriteFile(domainsPath, []byte("# trusted senders\nAmazon.COM.\n\nebay.com\namazon.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(directory, "milterguard.yaml")
+	content := "ai:\n  api_key: test-key\n  model: test-model\n  prompt_file: /tmp/test-prompt\nfiltering:\n  sender_domain_allowlist: " + domainsPath + "\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"amazon.com", "ebay.com"}
+	if len(cfg.Filtering.SenderDomainAllowlist) != len(want) {
+		t.Fatalf("loaded domains = %q", cfg.Filtering.SenderDomainAllowlist)
+	}
+	for index := range want {
+		if cfg.Filtering.SenderDomainAllowlist[index] != want[index] {
+			t.Fatalf("loaded domains = %q, want %q", cfg.Filtering.SenderDomainAllowlist, want)
+		}
+	}
+}
+
+func TestLoadRejectsInvalidOrMissingSenderDomainAllowlistFile(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "milterguard.yaml")
+	writeConfig := func(path string) {
+		content := "ai:\n  api_key: test-key\n  model: test-model\n  prompt_file: /tmp/test-prompt\nfiltering:\n  sender_domain_allowlist: " + path + "\n"
+		if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig(filepath.Join(directory, "missing.txt"))
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "sender_domain_allowlist") {
+		t.Fatalf("missing file error = %v", err)
+	}
+	invalidPath := filepath.Join(directory, "invalid.txt")
+	if err := os.WriteFile(invalidPath, []byte("*.example.com\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(invalidPath)
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "line 1") {
+		t.Fatalf("invalid domain error = %v", err)
+	}
+}
+
 func TestAttachmentBlockingDefaultsDisabled(t *testing.T) {
-	if defaults().Attachments.Block {
+	if defaults().Attachments.BlockExecutables {
 		t.Fatal("attachment blocking must default to disabled for existing configurations")
 	}
 }
@@ -208,7 +326,7 @@ func TestValidateRejectedIPPolicy(t *testing.T) {
 		{
 			name: "enabled attachment policy without detection",
 			configure: func(cfg *Config) {
-				cfg.Attachments.Block = true
+				cfg.Attachments.BlockExecutables = true
 				cfg.Attachments.BlockedExtensions = nil
 				cfg.Attachments.InspectSignatures = false
 			},
