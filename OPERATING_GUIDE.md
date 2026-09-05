@@ -168,7 +168,7 @@ Review the journal regularly:
 journalctl -u milterguard --since yesterday --no-pager -o cat
 ```
 
-Pay particular attention to legitimate messages classified as spam or scam,
+Pay particular attention to legitimate messages classified as unwanted,
 unwanted messages classified as legitimate, endpoint failures, and unusually
 slow responses. Adjust the detection prompt, model, or rejection threshold when
 the results consistently show that a change is needed.
@@ -229,7 +229,7 @@ When MilterGuard rejects unwanted mail, it records the sending IP address.
 Repeated attempts can then be rejected without another AI request, and persistent
 offenders receive longer blocks. Legitimate traffic gradually reduces an IP's
 negative reputation. In the supplied configuration, every three legitimate
-messages removes one recorded spam or scam strike, although an active block
+messages removes one recorded unwanted-mail strike, although an active block
 continues until it expires. Configured shared mail providers are protected from
 automatic blacklisting.
 
@@ -444,9 +444,21 @@ instance. The installer places it at
 
 Run a separate test instance in `enforce` mode on an unused port. Give its
 configuration separate correspondent, rejection-history, and IP-reputation
-state files so testing cannot alter production data. The replay tool reports
-the actual Milter response, so a test instance in `monitor` mode will report
-every message as accepted even when MilterGuard recommends rejection.
+state files so testing cannot alter production data. To ensure every corpus
+message reaches the AI, set `ip_reputation.block_duration` to `0s`,
+`ip_reputation.repeat_threshold` to `0`, and `correspondents.use_allowlist` to
+`false` in the test configuration. The replay tool reports the actual Milter
+response, so a test instance in `monitor` mode will report every message as
+accepted even when MilterGuard recommends rejection.
+
+By default, the replay tool reconstructs the SMTP peer IP, client hostname and
+HELO identity from the newest suitable external `Received` header. It also
+derives the envelope sender and recipient from `Return-Path`, `X-Original-To`,
+`Delivered-To`, or the visible address headers. Each message uses a separate
+Milter connection. Because saved headers do not preserve every original SMTP
+detail, unavailable values are reported rather than guessed. Use
+`--connection-info synthetic` for the previous deterministic loopback identity,
+or the individual override options shown by `--help`.
 
 Test representative directories and save the JSON Lines results:
 
@@ -467,4 +479,5 @@ python3 /usr/local/share/milterguard/tools/replay_mailbox.py \
 Port 8894 is used above for the separate test instance of MilterGuard.
 
 Each line records the file, result, expected result, whether they matched,
-latency, and any SMTP rejection detail. The final line summarizes the run.
+latency, SMTP rejection detail, reconstructed connection information, and the
+envelope addresses used. The final line summarizes the run.

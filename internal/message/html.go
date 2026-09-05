@@ -69,6 +69,14 @@ func writeHTMLText(b *strings.Builder, links, imageRefs *[]string, n *xhtml.Node
 		b.WriteByte(' ')
 		return
 	}
+	if n.Type == xhtml.ElementNode && n.Data == "blockquote" {
+		b.WriteString(" [quoted content begins] ")
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			writeHTMLText(b, links, imageRefs, child)
+		}
+		b.WriteString(" [quoted content ends] ")
+		return
+	}
 	if n.Type == xhtml.ElementNode && n.Data == "a" {
 		for child := n.FirstChild; child != nil; child = child.NextSibling {
 			writeHTMLText(b, links, imageRefs, child)

@@ -4,6 +4,8 @@
 import argparse
 import email.parser
 import email.policy
+import email.utils
+import ipaddress
 import json
 import re
 import socket
@@ -69,21 +71,29 @@ def negotiate(sock):
         raise RuntimeError(f"unexpected negotiation response: {response!r}")
 
 
-def begin_smtp_session(sock, remote_ip):
-    connect_payload = (
-        b"replay.local\x00"
-        + b"4"
-        + struct.pack("!H", 2525)
-        + remote_ip.encode("ascii")
-        + b"\x00"
-    )
+def begin_smtp_session(sock, connection):
+    hostname = connection["hostname"] or "unknown"
+    helo = connection["helo"] or "unknown"
+    remote_ip = connection["remote_ip"]
+    if remote_ip:
+        family = b"6" if ipaddress.ip_address(remote_ip).version == 6 else b"4"
+        connect_payload = (
+            hostname.encode("utf-8", "replace")
+            + b"\x00"
+            + family
+            + struct.pack("!H", 25)
+            + remote_ip.encode("ascii")
+            + b"\x00"
+        )
+    else:
+        connect_payload = hostname.encode("utf-8", "replace") + b"\x00U"
     continue_command(sock, b"C", connect_payload)
-    continue_command(sock, b"H", b"replay.local\x00")
+    continue_command(sock, b"H", helo.encode("utf-8", "replace") + b"\x00")
 
     # Exercise the transaction reset used when an SMTP session starts again
     # after STARTTLS. SMFIC_ABORT has no response.
     no_response_command(sock, b"A")
-    continue_command(sock, b"H", b"replay.local\x00")
+    continue_command(sock, b"H", helo.encode("utf-8", "replace") + b"\x00")
 
 
 def split_message(raw):
@@ -97,12 +107,106 @@ def split_message(raw):
     return raw[:position], raw[position + len(marker) :]
 
 
-def replay(sock, path, mail_from, rcpt_to):
+def load_message(path):
     raw = path.read_bytes()
     header_bytes, body = split_message(raw)
     parsed = email.parser.BytesHeaderParser(policy=email.policy.compat32).parsebytes(
         header_bytes + b"\n\n"
     )
+    return parsed, body
+
+
+def clean_identity(value):
+    if value is None:
+        return None
+    value = " ".join(str(value).replace("\x00", "").split()).strip("<>[]")
+    if not value or value.lower() == "unknown":
+        return None
+    return value[:255]
+
+
+def connection_from_received(parsed):
+    for header in parsed.get_all("Received", []):
+        value = " ".join(str(header).split())
+        from_clause = re.split(r"\s+by\s+", value, maxsplit=1, flags=re.I)[0]
+        addresses = re.findall(r"\[(?:IPv6:)?([0-9A-Fa-f:.]+)\]", from_clause, re.I)
+        remote_ip = None
+        for candidate in addresses:
+            try:
+                address = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if address.is_global:
+                remote_ip = address.compressed
+                break
+        if remote_ip is None:
+            continue
+
+        match = re.search(r"(?:^|\s)from\s+([^\s(]+)(?:\s+\((.*?)\))?", from_clause, re.I)
+        helo = clean_identity(match.group(1)) if match else None
+        hostname = None
+        if match and match.group(2):
+            before_address = re.split(r"\[(?:IPv6:)?[0-9A-Fa-f:.]+\]", match.group(2), maxsplit=1, flags=re.I)[0]
+            candidates = [clean_identity(item) for item in before_address.split()]
+            candidates = [item for item in candidates if item]
+            if candidates:
+                hostname = candidates[-1]
+        return {
+            "remote_ip": remote_ip,
+            "hostname": hostname,
+            "helo": helo,
+            "source": "received",
+        }
+    return {"remote_ip": None, "hostname": None, "helo": None, "source": "unavailable"}
+
+
+def replay_connection(parsed, args):
+    if args.connection_info == "received":
+        connection = connection_from_received(parsed)
+    else:
+        connection = {
+            "remote_ip": "127.0.0.1",
+            "hostname": "replay.local",
+            "helo": "replay.local",
+            "source": "synthetic",
+        }
+    if args.remote_ip is not None:
+        try:
+            connection["remote_ip"] = ipaddress.ip_address(args.remote_ip).compressed
+        except ValueError as exc:
+            raise ValueError(f"invalid --remote-ip: {args.remote_ip}") from exc
+        connection["source"] = "override"
+    if args.client_hostname is not None:
+        connection["hostname"] = clean_identity(args.client_hostname)
+        connection["source"] = "override"
+    if args.helo is not None:
+        connection["helo"] = clean_identity(args.helo)
+        connection["source"] = "override"
+    return connection
+
+
+def envelope_addresses(parsed, args):
+    if args.mail_from is not None:
+        mail_from = args.mail_from
+    elif parsed.get("Return-Path") is not None:
+        mail_from = email.utils.parseaddr(str(parsed.get("Return-Path")))[1]
+    else:
+        mail_from = email.utils.parseaddr(str(parsed.get("From", "")))[1]
+    if not mail_from and parsed.get("Return-Path") is None:
+        mail_from = "replay-sender@example.invalid"
+
+    rcpt_to = args.rcpt_to
+    if rcpt_to is None:
+        for header in ("X-Original-To", "Delivered-To", "To"):
+            rcpt_to = email.utils.parseaddr(str(parsed.get(header, "")))[1]
+            if rcpt_to:
+                break
+    if not rcpt_to:
+        rcpt_to = "replay-recipient@example.invalid"
+    return mail_from, rcpt_to
+
+
+def replay(sock, parsed, body, mail_from, rcpt_to):
 
     started = time.monotonic()
     response = command(sock, b"M", f"<{mail_from}>\x00".encode("ascii"))
@@ -164,9 +268,17 @@ def main():
     parser.add_argument("directory", type=Path, help="directory containing .eml files")
     parser.add_argument("--host", default="127.0.0.1", help="Milter host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8894, help="Milter port (default: 8894)")
-    parser.add_argument("--remote-ip", default="127.0.0.1", help="simulated SMTP peer IP")
-    parser.add_argument("--mail-from", default="replay-sender@example.invalid")
-    parser.add_argument("--rcpt-to", default="replay-recipient@example.invalid")
+    parser.add_argument(
+        "--connection-info",
+        choices=("received", "synthetic"),
+        default="received",
+        help="derive connection metadata from Received headers or use replay.local (default: received)",
+    )
+    parser.add_argument("--remote-ip", help="override the reconstructed SMTP peer IP")
+    parser.add_argument("--client-hostname", help="override the reconstructed MTA-reported hostname")
+    parser.add_argument("--helo", help="override the reconstructed SMTP HELO/EHLO identity")
+    parser.add_argument("--mail-from", help="override Return-Path/From envelope-sender reconstruction")
+    parser.add_argument("--rcpt-to", help="override X-Original-To/Delivered-To/To recipient reconstruction")
     parser.add_argument("--expected", choices=("accept", "reject"))
     parser.add_argument("--timeout", type=float, default=90, help="socket timeout in seconds")
     args = parser.parse_args()
@@ -180,15 +292,19 @@ def main():
     if not files:
         parser.error("no .eml files found")
 
-    with socket.create_connection((args.host, args.port), timeout=args.timeout) as sock:
-        sock.settimeout(args.timeout)
-        negotiate(sock)
-        begin_smtp_session(sock, args.remote_ip)
-        for path in files:
-            try:
+    for path in files:
+        try:
+            parsed, body = load_message(path)
+            connection = replay_connection(parsed, args)
+            mail_from, rcpt_to = envelope_addresses(parsed, args)
+            with socket.create_connection((args.host, args.port), timeout=args.timeout) as sock:
+                sock.settimeout(args.timeout)
+                negotiate(sock)
+                begin_smtp_session(sock, connection)
                 (result, detail), latency = replay(
-                    sock, path, args.mail_from, args.rcpt_to
+                    sock, parsed, body, mail_from, rcpt_to
                 )
+                send_frame(sock, b"Q")
                 totals[result] += 1
                 matched = args.expected is None or result == args.expected
                 mismatches += int(not matched)
@@ -201,19 +317,20 @@ def main():
                             "matched": matched,
                             "latency_ms": latency,
                             "detail": detail,
+                            "connection": connection,
+                            "mail_from": mail_from,
+                            "rcpt_to": rcpt_to,
                         }
                     ),
                     flush=True,
                 )
-            except Exception as exc:
-                totals["error"] += 1
-                mismatches += int(args.expected is not None)
-                print(
-                    json.dumps({"file": str(path), "result": "error", "error": str(exc)}),
-                    flush=True,
-                )
-                break
-        send_frame(sock, b"Q")
+        except Exception as exc:
+            totals["error"] += 1
+            mismatches += int(args.expected is not None)
+            print(
+                json.dumps({"file": str(path), "result": "error", "error": str(exc)}),
+                flush=True,
+            )
 
     print(
         json.dumps(

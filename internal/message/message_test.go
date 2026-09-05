@@ -36,6 +36,7 @@ func TestConnectionInformationPrecedesHeadersAndReportsDNSPrecisely(t *testing.T
 		ReverseDNS: []ReverseDNSName{
 			{Hostname: "174.185.205.92.host.secureserver.net", Confirmation: ForwardConfirmed},
 			{Hostname: "other.example", Confirmation: ForwardUnconfirmed},
+			{Hostname: "unresolved.example", Confirmation: ForwardLookupFailed},
 		},
 	}
 	m.AddHeader("Subject", "test")
@@ -44,7 +45,7 @@ func TestConnectionInformationPrecedesHeadersAndReportsDNSPrecisely(t *testing.T
 		"CONNECTION INFORMATION:",
 		"Remote IP: 92.205.185.174",
 		"MTA-reported client hostname: 174.185.205.92.host.secureserver.net",
-		"Reverse DNS: 174.185.205.92.host.secureserver.net (forward-confirmed), other.example (unconfirmed)",
+		"Reverse DNS: 174.185.205.92.host.secureserver.net (forward-confirmed), other.example (unconfirmed), unresolved.example (forward lookup failed)",
 		"Forward-confirmed reverse DNS: yes",
 		"SMTP HELO/EHLO identity: mx.example.com",
 	} {
@@ -197,6 +198,17 @@ func TestHTMLPreservesLinkTextAndDestination(t *testing.T) {
 	}
 }
 
+func TestHTMLMarksQuotedContentAndPreservesItsLinks(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/html")
+	m.AddBody([]byte(`<p>Current reply</p><blockquote>Earlier message <a href="https://example.invalid/profile">profile</a></blockquote>`))
+	prompt := m.Prompt(1000)
+	want := "Current reply [quoted content begins] Earlier message profile [link: https://example.invalid/profile] [quoted content ends]"
+	if !strings.Contains(prompt, want) {
+		t.Fatalf("HTML quote structure or link was not preserved: %s", prompt)
+	}
+}
+
 func TestHTMLExcludesScriptAndStyle(t *testing.T) {
 	m := New(10000)
 	m.AddHeader("Content-Type", "text/html")
@@ -207,6 +219,24 @@ func TestHTMLExcludesScriptAndStyle(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "Visible") {
 		t.Fatalf("visible text missing: %s", prompt)
+	}
+}
+
+func TestPromptStripsInvisibleFormattingAndPreheaderPadding(t *testing.T) {
+	m := New(10000)
+	m.AddHeader("Content-Type", "text/html")
+	m.AddBody([]byte(`<p>v&#x200c;e&#xad;r&#x034f;ify&#x202b; account` + strings.Repeat(` &#x200c; &#xad; &#x034f;`, 20) + `</p>`))
+	prompt := m.Prompt(1000)
+	if !strings.Contains(prompt, "verify account") {
+		t.Fatalf("invisible formatting was not removed from meaningful text: %q", prompt)
+	}
+	for _, unwanted := range []rune{'\u00ad', '\u034f', '\u200c', '\u202b'} {
+		if strings.ContainsRune(prompt, unwanted) {
+			t.Fatalf("prompt retained invisible formatting U+%04X: %q", unwanted, prompt)
+		}
+	}
+	if strings.Contains(prompt, strings.Repeat(" ", 2)) {
+		t.Fatalf("prompt retained repeated preheader padding spaces: %q", prompt)
 	}
 }
 

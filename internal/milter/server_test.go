@@ -250,7 +250,7 @@ func TestAIInputDiagnosticLoggingIsExplicitAndOmitsImageData(t *testing.T) {
 
 func TestRejectedIPDomainAllowlistReusesConnectionDNS(t *testing.T) {
 	server, conn, _ := testServer(t, fixedAnalyzer{decision: ai.Decision{
-		Classification: "scam", Score: 1, Reasons: []string{"test"},
+		Classification: "unwanted", Score: 1, Reasons: []string{"test"},
 	}})
 	server.cfg.Milter.ConnectionDNSTimeout = config.Duration(time.Second)
 	server.cfg.IPReputation.BlockDuration = config.Duration(time.Hour)
@@ -272,7 +272,7 @@ func TestRejectedIPDomainAllowlistReusesConnectionDNS(t *testing.T) {
 		connectFrame('4', "8.8.8.8"),
 		[]byte{commandMail},
 		[]byte{commandEndHeaders},
-		append([]byte{commandBody}, []byte("scam")...),
+		append([]byte{commandBody}, []byte("unwanted")...),
 	)
 	if err := writeFrame(conn, []byte{commandEndBody}); err != nil {
 		t.Fatal(err)
@@ -847,7 +847,7 @@ func TestAIResultLearnsInboundSender(t *testing.T) {
 }
 
 func TestRejectedIPBypassesSecondAIAnalysis(t *testing.T) {
-	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "scam", Score: 1, Reasons: []string{"test"}}}
+	analyzer := &countingAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}}
 	server, conn, done := testServer(t, analyzer)
 	server.cfg.IPReputation.BlockDuration = config.Duration(15 * time.Minute)
 	server.cfg.IPReputation.MaxEntries = 100

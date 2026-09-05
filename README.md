@@ -16,13 +16,13 @@ MilterGuard is an AI-powered mail filter for identifying and rejecting unwanted 
 - Automatically builds persistent IP reputation to block repeat offenders without repeated AI analysis.
 - Manage allowlists and review rejected mail securely by email.
 - Can scan inbound and outbound email, helping protect your server's sending reputation.
-- The core service installs as a single, statically linked binary with no runtime dependencies; the optional mailbox replay tool requires Python 3.
+- Installs as a single, statically linked binary with no runtime dependencies.
 - Provides a safe monitor mode that logs classifications and proposed actions without blocking email.
 - Cost-effective to operate at approximately $0.35 per 1,000 scanned emails with the suggested LLM, depending on message length and provider pricing.
 - Avoids provider lock-in by supporting compatible hosted AI services and locally hosted AI models.
 - Includes install and uninstall scripts for painless installation and removal.
 
-MilterGuard works with OpenRouter and llama.cpp-style `v1/chat/completions` AI endpoints.
+MilterGuard works with OpenRouter, OpenAI and llama.cpp-style `v1/chat/completions` AI endpoints.
 
 ## Install
 

@@ -116,7 +116,7 @@ func (ss *session) handleEmailCommand(ctx context.Context) (bool, bool) {
 	}
 	if command.kind == "whitelist_list" {
 		entries := ss.server.correspondents.listAllowlist(command.recipient)
-		body := formatAllowlist(entries, admin)
+		body := formatAllowlist(entries, includeAllowlistRecipient(admin, command.recipient))
 		queued := ss.queueCommandReply(replyTo, "MilterGuard correspondent allowlist", body)
 		outcome := fmt.Sprintf("listed %d allowlist entries", len(entries))
 		return true, ss.discardEmailCommand(ctx, identity, command.canonical, outcome, "", command.recipient, queued)
@@ -337,13 +337,30 @@ func formatAllowlist(entries []correspondentEntry, includeRecipient bool) string
 	}
 	var body strings.Builder
 	for _, entry := range entries {
+		fmt.Fprintf(&body, "Sender: %s\n", entry.Correspondent)
 		if includeRecipient {
-			fmt.Fprintf(&body, "Sender: %s Recipient: %s\n", entry.Correspondent, entry.LocalAddress)
-		} else {
-			fmt.Fprintf(&body, "Sender: %s\n", entry.Correspondent)
+			fmt.Fprintf(&body, "Recipient: %s\n", entry.LocalAddress)
 		}
+		fmt.Fprintf(&body, "Added: %s\n\n", allowlistAddedDescription(entry.WhitelistType))
 	}
 	return body.String()
+}
+
+func includeAllowlistRecipient(admin bool, recipient string) bool {
+	return admin && recipient == "*"
+}
+
+func allowlistAddedDescription(whitelistType string) string {
+	switch whitelistType {
+	case whitelistManual:
+		return "manually"
+	case whitelistAuthenticatedOutbound:
+		return "learned from authenticated outbound email"
+	case whitelistRepeatedLegitimate:
+		return "learned from repeated legitimate inbound emails"
+	default:
+		return "unknown"
+	}
 }
 
 func formatActiveIPBlocks(entries []activeIPBlock, includeHostname bool) string {
@@ -375,7 +392,7 @@ func formatRejectionHistory(entries []rejectionHistoryEntry) string {
 		if reason == "" {
 			reason = "Unavailable (record predates reason logging)"
 		}
-		fmt.Fprintf(&body, "From: %s To: %s Date: %s Reason: %s\n", entry.Sender, entry.Recipient, entry.RejectedAt.UTC().Format("2006-01-02 15:04:05 UTC"), reason)
+		fmt.Fprintf(&body, "From: %s\nTo: %s\nDate: %s\nReason: %s\n\n", entry.Sender, entry.Recipient, entry.RejectedAt.UTC().Format("2006-01-02 15:04:05 UTC"), reason)
 	}
 	return body.String()
 }

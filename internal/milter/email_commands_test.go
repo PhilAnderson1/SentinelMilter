@@ -147,12 +147,47 @@ func TestAllowlistListCommandAuthorization(t *testing.T) {
 }
 
 func TestAllowlistFormattingIncludesRecipientsOnlyForAdministrators(t *testing.T) {
-	entries := []correspondentEntry{{Correspondent: "news@example.net", LocalAddress: "phil@example.com"}}
-	if got := formatAllowlist(entries, false); got != "Sender: news@example.net\n" {
+	entries := []correspondentEntry{{Correspondent: "news@example.net", LocalAddress: "phil@example.com", WhitelistType: whitelistRepeatedLegitimate}}
+	if got := formatAllowlist(entries, false); got != "Sender: news@example.net\nAdded: learned from repeated legitimate inbound emails\n\n" {
 		t.Fatalf("ordinary-user output = %q", got)
 	}
-	if got := formatAllowlist(entries, true); got != "Sender: news@example.net Recipient: phil@example.com\n" {
+	if got := formatAllowlist(entries, true); got != "Sender: news@example.net\nRecipient: phil@example.com\nAdded: learned from repeated legitimate inbound emails\n\n" {
 		t.Fatalf("administrator output = %q", got)
+	}
+}
+
+func TestAllowlistListIncludesRecipientOnlyForAdministratorWildcard(t *testing.T) {
+	tests := []struct {
+		name      string
+		admin     bool
+		recipient string
+		want      bool
+	}{
+		{name: "ordinary user", admin: false, recipient: "phil@example.com", want: false},
+		{name: "administrator specific recipient", admin: true, recipient: "phil@example.com", want: false},
+		{name: "administrator wildcard", admin: true, recipient: "*", want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := includeAllowlistRecipient(test.admin, test.recipient)
+			if got != test.want {
+				t.Fatalf("include recipient = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAllowlistAddedDescriptions(t *testing.T) {
+	tests := map[string]string{
+		whitelistManual:                "manually",
+		whitelistAuthenticatedOutbound: "learned from authenticated outbound email",
+		whitelistRepeatedLegitimate:    "learned from repeated legitimate inbound emails",
+		"invalid":                      "unknown",
+	}
+	for whitelistType, want := range tests {
+		if got := allowlistAddedDescription(whitelistType); got != want {
+			t.Errorf("allowlistAddedDescription(%q) = %q, want %q", whitelistType, got, want)
+		}
 	}
 }
 

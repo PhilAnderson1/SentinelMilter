@@ -19,7 +19,7 @@ func TestIPReputationDeferredPersistence(t *testing.T) {
 	}
 	store := newIPReputationStore(cfg, nil)
 	store.enableDeferredPersistence()
-	store.add(netip.MustParseAddr("192.0.2.1"), "spam", 1, connectionDNSResult{})
+	store.add(netip.MustParseAddr("192.0.2.1"), "unwanted", 1, connectionDNSResult{})
 	assertNotPersisted(t, path)
 	if err := store.flush(); err != nil {
 		t.Fatal(err)

@@ -23,16 +23,16 @@ func TestApplyPolicy(t *testing.T) {
 		selected action
 	}{
 		{
-			name:     "enforce rejects matching scam",
+			name:     "enforce rejects unwanted",
 			mode:     "enforce",
-			decision: ai.Decision{Classification: "scam", Score: 0.9},
+			decision: ai.Decision{Classification: "unwanted", Score: 0.9},
 			proposed: actionReject,
 			selected: actionReject,
 		},
 		{
 			name:     "monitor records rejection but accepts",
 			mode:     "monitor",
-			decision: ai.Decision{Classification: "spam", Score: 1},
+			decision: ai.Decision{Classification: "unwanted", Score: 1},
 			proposed: actionReject,
 			selected: actionAccept,
 		},
@@ -44,9 +44,9 @@ func TestApplyPolicy(t *testing.T) {
 			selected: actionAccept,
 		},
 		{
-			name:     "sub-threshold spam is accepted",
+			name:     "sub-threshold unwanted is accepted",
 			mode:     "enforce",
-			decision: ai.Decision{Classification: "spam", Score: 0.89},
+			decision: ai.Decision{Classification: "unwanted", Score: 0.89},
 			proposed: actionAccept,
 			selected: actionAccept,
 		},
@@ -90,7 +90,7 @@ func TestLogOutcomeRecordsResponseDelivery(t *testing.T) {
 	msg.AddHeader("Message-ID", "<test@example.invalid>")
 	result := evaluationResult{
 		proposed: actionReject, selected: actionReject,
-		classification: "scam", score: 1, reasons: []string{"test"},
+		classification: "unwanted", score: 1, reasons: []string{"test"},
 		latency: time.Millisecond,
 	}
 	server.logOutcome(context.Background(), msg, result, false, errors.New("write failed"))

@@ -200,7 +200,7 @@ func (s *correspondentStore) recordInboundClassification(correspondent string, r
 	defer s.mu.Unlock()
 	saveNeeded := s.removeStaleLocked(now) > 0
 
-	if classification == "spam" || classification == "scam" {
+	if classification == "unwanted" {
 		if score < unwantedMinScore {
 			if saveNeeded {
 				return s.saveLocked()

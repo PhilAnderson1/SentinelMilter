@@ -9,7 +9,7 @@
 
 # Operation mode: monitor or enforce.
 # monitor logs proposed decisions but always accepts mail.
-# enforce can reject spam/scam decisions according to policy below.
+# enforce can reject unwanted decisions according to policy below.
 mode: monitor
 
 milter:
@@ -85,7 +85,7 @@ ai:
   app_name: MilterGuard
 
 filtering:
-  # Reject spam or scam classifications at or above this confidence score (0-1).
+  # Reject unwanted classifications at or above this confidence score (0-1).
   reject_score: 0.9
 
   # Scan email sent by authenticated users. Set to true to enable attachment

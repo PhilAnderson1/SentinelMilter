@@ -199,7 +199,7 @@ func (s *Server) logAIInput(msg *message.Message, input ai.Input) {
 
 func (s *Server) applyPolicy(decision ai.Decision) (action, action) {
 	proposed := actionAccept
-	if (decision.Classification == "spam" || decision.Classification == "scam") && decision.Score >= s.cfg.Filtering.RejectScore {
+	if decision.Classification == "unwanted" && decision.Score >= s.cfg.Filtering.RejectScore {
 		proposed = actionReject
 	}
 	selected := proposed

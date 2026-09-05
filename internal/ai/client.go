@@ -140,7 +140,7 @@ func responseExcerpt(raw []byte) string {
 
 func validate(d Decision) error {
 	switch d.Classification {
-	case "legitimate", "spam", "scam", "uncertain":
+	case "legitimate", "unwanted":
 	default:
 		return fmt.Errorf("invalid classification %q", d.Classification)
 	}

@@ -19,7 +19,9 @@ jobs:
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
       - name: Check mailbox replay tool
-        run: python3 -m py_compile tools/replay_mailbox.py
+        run: |
+          python3 -m py_compile tools/replay_mailbox.py
+          python3 -m unittest tools/replay_mailbox_test.py
       - name: Test
         run: go test ./...
       - name: Vet

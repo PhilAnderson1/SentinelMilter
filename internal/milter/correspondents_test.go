@@ -220,7 +220,7 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 		t.Fatalf("first candidate result = %#v", entry)
 	}
 	record("legitimate", .9, true)
-	record("uncertain", 1, true)
+	record("unwanted", .89, true)
 	if count := store.entries[key].LegitimateEmailCount; count != 1 {
 		t.Fatalf("neutral results changed count to %d", count)
 	}
@@ -229,13 +229,13 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	if match := store.match("news@example.net", []string{"owner@example.com"}); !match.Known {
 		t.Fatal("threshold-qualified inbound sender is not known")
 	}
-	record("spam", .89, true)
+	record("unwanted", .89, true)
 	if _, exists := store.entries[key]; !exists {
-		t.Fatal("below-threshold spam classification deleted inbound-learned entry")
+		t.Fatal("below-threshold unwanted classification deleted inbound-learned entry")
 	}
-	record("spam", .9, true)
+	record("unwanted", .9, true)
 	if _, exists := store.entries[key]; exists {
-		t.Fatal("spam classification did not delete inbound-learned entry")
+		t.Fatal("unwanted classification did not delete inbound-learned entry")
 	}
 
 	record("legitimate", 1, true)
@@ -246,9 +246,9 @@ func TestInboundLegitimateSenderCandidateLifecycle(t *testing.T) {
 	if entry.WhitelistType != whitelistAuthenticatedOutbound || entry.LegitimateEmailCount != 0 || !store.qualified(entry) {
 		t.Fatalf("authenticated outbound promotion = %#v", entry)
 	}
-	record("scam", 1, true)
+	record("unwanted", 1, true)
 	if _, exists := store.entries[key]; !exists {
-		t.Fatal("scam classification deleted authenticated-outbound entry")
+		t.Fatal("unwanted classification deleted authenticated-outbound entry")
 	}
 }
 

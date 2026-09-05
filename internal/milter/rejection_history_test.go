@@ -81,7 +81,10 @@ func TestRejectionHistoryWildcardAndFormatting(t *testing.T) {
 		t.Fatalf("wildcard history count = %d", len(entries))
 	}
 	formatted := formatRejectionHistory(entries)
-	for _, want := range []string{"From: news@example.net", "To: alice@example.com", "To: bob@example.com", "Date: 2026-09-03 12:34:56 UTC", "Reason: Phishing link; Impersonated sender"} {
+	for _, want := range []string{
+		"From: news@example.net\nTo: alice@example.com\nDate: 2026-09-03 12:34:56 UTC\nReason: Phishing link; Impersonated sender\n\n",
+		"From: news@example.net\nTo: bob@example.com\nDate: 2026-09-03 12:34:56 UTC\nReason: Phishing link; Impersonated sender\n\n",
+	} {
 		if !strings.Contains(formatted, want) {
 			t.Errorf("formatted history missing %q: %s", want, formatted)
 		}

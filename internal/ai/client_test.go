@@ -13,13 +13,17 @@ import (
 )
 
 func TestValidate(t *testing.T) {
-	if err := validate(Decision{Classification: "scam", Score: .98, Reasons: []string{"impersonation"}}); err != nil {
-		t.Fatal(err)
+	for _, classification := range []string{"legitimate", "unwanted"} {
+		if err := validate(Decision{Classification: classification, Score: .98, Reasons: []string{"evidence"}}); err != nil {
+			t.Fatalf("valid classification %q rejected: %v", classification, err)
+		}
 	}
-	if err := validate(Decision{Classification: "evil", Score: .5}); err == nil {
-		t.Fatal("expected invalid classification")
+	for _, classification := range []string{"spam", "scam", "uncertain", "evil"} {
+		if err := validate(Decision{Classification: classification, Score: .5}); err == nil {
+			t.Fatalf("expected classification %q to be invalid", classification)
+		}
 	}
-	if err := validate(Decision{Classification: "spam", Score: 1.1}); err == nil {
+	if err := validate(Decision{Classification: "unwanted", Score: 1.1}); err == nil {
 		t.Fatal("expected invalid score")
 	}
 }
@@ -129,7 +133,7 @@ func TestMultimodalRequestIncludesPrivateBase64Image(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"classification\":\"scam\",\"score\":1,\"reasons\":[\"image evidence\"]}"}}]}`)),
+			Body:       io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"{\"classification\":\"unwanted\",\"score\":1,\"reasons\":[\"image evidence\"]}"}}]}`)),
 		}, nil
 	})
 	client := NewClient(config.AIConfig{

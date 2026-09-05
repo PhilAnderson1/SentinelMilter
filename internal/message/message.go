@@ -133,5 +133,5 @@ func (m *Message) RetainedBytes() int64 { return m.headerSize + m.bodySize }
 // mailbox. Callers separately constrain the accepted top-level MIME types.
 func (m *Message) CommandText() string {
 	content := extractMIME(m.Header("Content-Type"), m.Header("Content-Transfer-Encoding"), "", []byte(m.Body.String()), 0)
-	return strings.ToValidUTF8(content.VisibleText, "�")
+	return stripInvisibleFormatting(content.VisibleText)
 }

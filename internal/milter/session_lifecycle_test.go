@@ -63,7 +63,7 @@ func TestProtocolRejectsInvalidSequences(t *testing.T) {
 }
 
 func TestAbortDoesNotDesynchronizeNextTransaction(t *testing.T) {
-	_, conn, done := testServer(t, fixedAnalyzer{decision: ai.Decision{Classification: "scam", Score: 1, Reasons: []string{"test"}}})
+	_, conn, done := testServer(t, fixedAnalyzer{decision: ai.Decision{Classification: "unwanted", Score: 1, Reasons: []string{"test"}}})
 	defer conn.Close()
 	negotiate(t, conn)
 	if err := writeFrame(conn, []byte{commandMail}); err != nil {
